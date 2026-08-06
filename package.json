@@ -8,7 +8,7 @@
     "client": "cd client && npm run dev",
     "build": "cd client && npm run build",
     "start": "node server/index.js",
-    "test": "node --test server/tests",
+    "test": "node --test server/tests/*.test.js",
     "lint": "node --check server/index.js && node --check server/routes/sign.js"
   },
   "dependencies": {

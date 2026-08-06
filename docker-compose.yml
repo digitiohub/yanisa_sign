@@ -11,6 +11,7 @@ services:
       CLIENT_URL: ${CLIENT_URL:-}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in Coolify}
       APP_URL: ${APP_URL:-http://localhost:5000}
+      STORAGE_PATH: /app/storage
       ADMIN_EMAIL: ${ADMIN_EMAIL:?Set ADMIN_EMAIL in Coolify}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in Coolify}
       MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Yanisa HR}
