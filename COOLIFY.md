@@ -14,7 +14,7 @@ Do not put MongoDB into this application's Compose stack. `docker-compose.yml` d
 3. Create DNS `A` record from `sign.example.com` to Coolify server public IP. Wait until DNS resolves.
 4. In Coolify, create/select project, then open target environment, usually `production`.
 
-Both resources must be in same Coolify project, environment, and server/destination. This allows app to use MongoDB internal network URL without making database public.
+Both resources must use same Coolify server/destination. Because app is Docker Compose service stack, you must also enable its **Connect to Predefined Network** setting in Step 4a. Without it, Mongo internal hostname cannot resolve.
 
 ## Service 1 — MongoDB
 
@@ -33,20 +33,21 @@ Coolify creates persistent database storage and database credentials. You do not
 ### 2. Copy internal Mongo connection URL
 
 1. Open deployed MongoDB resource.
-2. Find **Connection Details**, **Internal URL**, or generated environment variables shown by your Coolify version.
-3. Copy internal connection URL. It looks like:
+2. Find exact Mongo root username, root password, and database resource UUID in database resource's environment variables/configuration. Copy values exactly; these are often `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD`.
+3. Copy internal hostname exactly as Coolify displays it. Do not add a prefix or alter it. Some Coolify versions use bare resource UUID; others use a service-prefixed hostname.
+4. URL-encode username and password before placing them in URL. This is required when either value contains `@`, `:`, `/`, `?`, `#`, `%`, or other reserved URL characters. In Windows PowerShell:
 
-   ```text
-   mongodb://USERNAME:PASSWORD@INTERNAL_HOST:27017/?authSource=admin
+   ```powershell
+   [uri]::EscapeDataString('PASTE_PASSWORD_HERE')
    ```
 
-4. Add app database name `signapp` before `?`, if URL has no database name:
+5. Build/copy internal connection URL. It looks like:
 
    ```text
-   mongodb://USERNAME:PASSWORD@INTERNAL_HOST:27017/signapp?authSource=admin
+   mongodb://USERNAME:PASSWORD@INTERNAL_HOST_FROM_COOLIFY:27017/signapp?authSource=admin&directConnection=true
    ```
 
-5. Save this full URL privately. It becomes app's `MONGO_URI` variable.
+6. Save this full URL privately. It becomes app's `MONGO_URI` variable.
 
 Never use MongoDB public URL for app when both resources share Coolify environment. Do not expose port `27017` to internet unless separate external tool requires it.
 
@@ -62,19 +63,33 @@ Never use MongoDB public URL for app when both resources share Coolify environme
 6. Confirm service list contains only `app`.
 7. Do not deploy yet; add environment variables first.
 
-### 4. Add required app environment variables
+### 4. Connect app to Coolify predefined network
+
+1. Open Yanisa Sign application resource.
+2. Open **Settings** / **General** / **Service Stack** settings.
+3. Enable **Connect to Predefined Network** (may read **Connect to Predefined Networks**).
+4. Save.
+5. Do not add `networks:` section to `docker-compose.yml`; Coolify manages it.
+
+### 4a. Add required app environment variables
 
 Open app resource **Environment Variables**. Add each item below as runtime variable. Mark secret values as secret/hidden in Coolify.
 
 | Name | Required value |
 | --- | --- |
-| `MONGO_URI` | Internal Mongo connection URL from Step 2, including `/signapp?authSource=admin` |
+| `MONGO_URI` | Internal URL from Step 2, with `signapp`, `authSource=admin`, and any URL-encoded credentials |
 | `JWT_SECRET` | Unique random value, minimum 32 characters |
 | `ADMIN_EMAIL` | Initial HR administrator email address |
 | `ADMIN_PASSWORD` | Unique, long admin password |
 | `APP_URL` | Exact public HTTPS URL, e.g. `https://sign.example.com` |
 
-Generate secrets with password manager or `openssl rand -hex 32`. Never reuse Mongo password as `JWT_SECRET` or admin password.
+Generate secrets with password manager. On Windows PowerShell, use this for `JWT_SECRET`:
+
+```powershell
+[Convert]::ToHexString([System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).ToLower()
+```
+
+On Linux/macOS, use `openssl rand -hex 32`. Never reuse Mongo password as `JWT_SECRET` or admin password.
 
 ### 5. Add email variables
 
@@ -121,8 +136,9 @@ Optional app variables: `MAX_PDF_SIZE_MB=20`, `DEFAULT_SIGN_VALID_DAYS=7`, `SIGN
 | Symptom | Check |
 | --- | --- |
 | App stops at deploy | Required `MONGO_URI`, `JWT_SECRET`, `ADMIN_EMAIL`, or `ADMIN_PASSWORD` missing |
-| Health shows `database: "disconnected"` | Use Mongo internal URL; verify both resources share project/environment/server |
-| Authentication error | Copy Mongo username/password again from database resource; verify `authSource=admin` |
+| `getaddrinfo EAI_AGAIN` / `ENOTFOUND` | Enable **Connect to Predefined Network** on app resource. Keep internal hostname exactly as Coolify displays it |
+| Health shows `database: "disconnected"` | Verify both resources share Coolify server/destination and app network setting is enabled |
+| `Authentication failed` | Use exact `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD`; URL-encode credentials; verify URI ends in `?authSource=admin` |
 | Signer link wrong | Set `APP_URL` to exact HTTPS app domain, no trailing path |
 | Emails fail | Verify SMTP host, port, `SMTP_SECURE`, sender identity, and provider logs |
 | PDF gone after redeploy | Confirm app resource's `sign-storage` volume was not deleted |
