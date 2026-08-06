@@ -16,7 +16,7 @@ The frontend runs at `http://localhost:5173` and proxies `/api` to Express on po
 
 Full setup, environment table, post-deploy checks, backup and upgrade notes: [COOLIFY.md](COOLIFY.md).
 
-The application health endpoint is `/api/health`. MongoDB data is persisted in `mongo-data`; protected original and signed PDFs are persisted in `sign-storage`. Both survive application redeployments and should be included in VPS backups.
+The application health endpoint is `/api/health`. MongoDB is deployed as its own Coolify resource; protected original and signed PDFs persist in the app resource's `sign-storage` volume. Back up both resources.
 
 ## HRMS integration hooks
 

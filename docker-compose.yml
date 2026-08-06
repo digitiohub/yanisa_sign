@@ -7,7 +7,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5000
-      MONGO_URI: mongodb://${MONGO_USERNAME:-signapp}:${MONGO_PASSWORD:?Set MONGO_PASSWORD in Coolify}@mongo:27017/signapp?authSource=admin
+      MONGO_URI: ${MONGO_URI:?Set MONGO_URI from the separate Coolify MongoDB resource}
       CLIENT_URL: ${CLIENT_URL:-}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in Coolify}
       APP_URL: ${APP_URL:-http://localhost:5000}
@@ -22,9 +22,6 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_SECURE: ${SMTP_SECURE:-false}
       HR_NOTIFICATION_EMAIL: ${HR_NOTIFICATION_EMAIL:-}
-    depends_on:
-      mongo:
-        condition: service_healthy
     expose:
       - "5000"
     volumes:
@@ -36,21 +33,5 @@ services:
       retries: 3
       start_period: 20s
 
-  mongo:
-    image: mongo:7
-    restart: unless-stopped
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_USERNAME:-signapp}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD:?Set MONGO_PASSWORD in Coolify}
-    volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test: ["CMD-SHELL", "mongosh --quiet --username \"$$MONGO_INITDB_ROOT_USERNAME\" --password \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval 'db.adminCommand({ ping: 1 })' >/dev/null"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-
 volumes:
-  mongo-data:
   sign-storage:
