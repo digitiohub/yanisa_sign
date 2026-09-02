@@ -6,6 +6,10 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const SignDocument = require('../models/SignDocument');
 const SignAccess = require('../models/SignAccess');
 const { authenticate, permit } = require('../middleware/auth');
+const { documentListFilter, documentAccess, requireDocument } = require('../services/access');
+const { logActivity, logAuditEvent } = require('../services/audit');
+const DocumentMember = require('../models/DocumentMember');
+const User = require('../models/User');
 const storage = require('../services/storage');
 const mail = require('../services/mail');
 
@@ -13,7 +17,12 @@ const router = express.Router();
 const maxSize = Number(process.env.MAX_PDF_SIZE_MB || 20) * 1024 * 1024;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxSize, files: 1 }, fileFilter: (_req, file, cb) => cb(file.mimetype === 'application/pdf' ? null : new Error('Only PDF files are allowed'), file.mimetype === 'application/pdf') });
 const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
-const audit = (req, event, metadata = {}, signerId) => ({ event, actorType: req.user ? 'user' : 'signer', actorId: req.user?.sub, signerId, ipAddress: req.ip, userAgent: req.get('user-agent'), metadata });
+const audit = (req, event, metadata = {}, signerId) => ({ event, actorType: req.user ? 'user' : 'signer', actorId: req.user?.email, signerId, ipAddress: req.ip, userAgent: req.get('user-agent'), metadata });
+// Mirrors a document event into the central activity log so administrators can
+// follow who did what without opening every document.
+const trackSigner = (req, doc, signer, action, description, metadata) => logActivity({ req, companyId: doc.companyId, workspaceId: doc.workspaceId, actor: { email: signer?.email, firstName: signer?.name }, actorType: 'signer', action, entityType: 'document', entityId: doc._id, entityLabel: doc.title, documentId: doc._id, description, metadata });
+const track = (req, doc, action, description, extra = {}) => logActivity({ req, workspaceId: doc.workspaceId, action, entityType: extra.entityType || 'document', entityId: doc._id, entityLabel: doc.title, documentId: doc._id, description, before: extra.before, after: extra.after, metadata: extra.metadata });
+const guard = capability => requireDocument(SignDocument, capability);
 const ref = () => `SGN-${new Date().getUTCFullYear()}-${crypto.randomInt(0, 1000000).toString().padStart(6, '0')}`;
 
 async function appendCompletionCertificate(pdf, doc, signingHash) {
@@ -69,34 +78,105 @@ async function appendCompletionCertificate(pdf, doc, signingHash) {
   rule(page2, 45); text(page2, 'Page 2 / 2', 270, 28, 8, font, muted);
 }
 
-router.get('/', authenticate, permit('sign.view'), async (req, res, next) => {
-  try { const query = req.query.status ? { status: req.query.status } : {}; if (req.query.q) query.$text = { $search: req.query.q }; res.json(await SignDocument.find(query).select('-audits -fields.value').sort({ updatedAt: -1 }).lean()); } catch (e) { next(e); }
+router.get('/', authenticate, permit('documents.view'), async (req, res, next) => {
+  try {
+    const query = await documentListFilter(req.user);
+    if (req.query.status) query.status = req.query.status;
+    if (req.query.ownerId) query.createdByUserId = req.query.ownerId;
+    if (req.query.workspaceId) query.workspaceId = req.query.workspaceId;
+    if (req.query.from || req.query.to) { query.createdAt = {}; if (req.query.from) query.createdAt.$gte = new Date(req.query.from); if (req.query.to) query.createdAt.$lte = new Date(`${req.query.to}T23:59:59.999Z`); }
+    if (req.query.q) query.$text = { $search: req.query.q };
+    const docs = await SignDocument.find(query).select('-audits -fields.value').sort({ updatedAt: -1 }).limit(Math.min(Number(req.query.limit) || 200, 500)).lean();
+    const owners = await User.find({ _id: { $in: [...new Set(docs.map(d => String(d.createdByUserId)).filter(Boolean))] } }).select('firstName lastName email').lean();
+    const byId = new Map(owners.map(owner => [String(owner._id), { id: owner._id, fullName: `${owner.firstName} ${owner.lastName}`.trim(), email: owner.email }]));
+    res.json(docs.map(doc => ({ ...doc, owner: byId.get(String(doc.createdByUserId)) || { fullName: doc.createdBy, email: doc.createdBy } })));
+  } catch (e) { next(e); }
 });
 
-router.post('/upload', authenticate, permit('sign.upload'), upload.single('pdf'), async (req, res, next) => {
+router.post('/upload', authenticate, permit('documents.create'), upload.single('pdf'), async (req, res, next) => {
   try {
     if (!req.file || req.file.buffer.subarray(0, 5).toString() !== '%PDF-') return res.status(400).json({ error: 'A valid PDF is required' });
     let pdf; try { pdf = await PDFDocument.load(req.file.buffer); } catch { return res.status(400).json({ error: 'The PDF is corrupt or unsupported' }); }
     const originalFile = await storage.save('originals', req.file.buffer);
-    const doc = await SignDocument.create({ referenceNumber: ref(), title: String(req.body.title || req.file.originalname.replace(/\.pdf$/i, '')).slice(0, 180), originalFile, originalHash: hash(req.file.buffer), pageCount: pdf.getPageCount(), createdBy: req.user.sub, relatedEntityType: req.body.relatedEntityType, relatedEntityId: req.body.relatedEntityId, audits: [audit(req, 'document_uploaded', { filename: req.file.originalname, size: req.file.size })] });
+    const doc = await SignDocument.create({ referenceNumber: ref(), title: String(req.body.title || req.file.originalname.replace(/\.pdf$/i, '')).slice(0, 180), originalFile, originalHash: hash(req.file.buffer), pageCount: pdf.getPageCount(), companyId: req.user.companyId, workspaceId: req.user.workspaceId, ownerId: req.user._id, createdByUserId: req.user._id, createdBy: req.user.email, relatedEntityType: req.body.relatedEntityType, relatedEntityId: req.body.relatedEntityId, audits: [audit(req, 'document_uploaded', { filename: req.file.originalname, size: req.file.size })] });
+    await track(req, doc, 'document.created', `${req.user.fullName} uploaded "${doc.title}"`, { metadata: { filename: req.file.originalname, pages: doc.pageCount, reference: doc.referenceNumber } });
     res.status(201).json(doc);
   } catch (e) { next(e); }
 });
 
-router.get('/:id', authenticate, permit('sign.view'), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id).lean(); if (!doc) return res.status(404).json({ error: 'Document not found' }); res.json(doc); } catch (e) { next(e); } });
-router.get('/:id/pdf', authenticate, permit('sign.view'), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id); if (!doc) return res.sendStatus(404); const file=req.query.certificate==='true'&&doc.certificateFile?doc.certificateFile:req.query.signed==='true'&&doc.signedFile?doc.signedFile:doc.originalFile; res.type('pdf').send(await fs.readFile(file)); } catch (e) { next(e); } });
-
-router.put('/:id/design', authenticate, permit('sign.edit'), async (req, res, next) => {
+router.get('/:id', authenticate, permit('documents.view'), guard(), async (req, res, next) => {
+  try { res.json({ ...req.document.toObject(), access: req.documentAccess }); } catch (e) { next(e); }
+});
+router.get('/:id/pdf', authenticate, permit('documents.view'), guard(), async (req, res, next) => {
   try {
-    const doc = await SignDocument.findById(req.params.id); if (!doc) return res.sendStatus(404); if (!['Draft', 'Ready to Send'].includes(doc.status)) return res.status(409).json({ error: 'A sent document cannot be redesigned' });
-    if (!Array.isArray(req.body.signers) || !Array.isArray(req.body.fields)) return res.status(400).json({ error: 'Signers and fields are required' });
-    doc.signers = req.body.signers; doc.fields = req.body.fields; doc.status = doc.signers.length && doc.fields.length ? 'Ready to Send' : 'Draft'; doc.audits.push(audit(req, 'design_saved', { signerCount: doc.signers.length, fieldCount: doc.fields.length })); await doc.save(); res.json(doc);
+    const doc = req.document;
+    const wantsCopy = req.query.certificate === 'true' || req.query.signed === 'true';
+    if (wantsCopy && !req.documentAccess.canDownload) return res.status(403).json({ error: 'You do not have permission to download this document.' });
+    const file = req.query.certificate === 'true' && doc.certificateFile ? doc.certificateFile : req.query.signed === 'true' && doc.signedFile ? doc.signedFile : doc.originalFile;
+    if (req.query.download === 'true') await track(req, doc, 'document.downloaded', `${req.user.fullName} downloaded "${doc.title}"`, { metadata: { copy: req.query.certificate === 'true' ? 'certificate' : req.query.signed === 'true' ? 'signed' : 'original' } });
+    res.type('pdf').send(await fs.readFile(file));
   } catch (e) { next(e); }
 });
 
-router.post('/:id/send', authenticate, permit('sign.send'), async (req, res, next) => {
+// Compares the saved design with the incoming one so the activity log can say
+// exactly which signer or field changed, and how.
+function diffDesign(previous, next) {
+  const events = [];
+  const signersBefore = new Map(previous.signers.map(signer => [String(signer._id), signer]));
+  const signersAfter = new Map(next.signers.map(signer => [String(signer._id), signer]));
+  for (const [id, signer] of signersAfter) {
+    const before = signersBefore.get(id);
+    if (!before) events.push({ action: 'signer.added', entityType: 'signer', description: `added signer ${signer.name} <${signer.email}>`, after: { name: signer.name, email: signer.email, type: signer.type } });
+    else if (before.name !== signer.name || before.email !== signer.email || before.type !== signer.type)
+      events.push({ action: 'signer.updated', entityType: 'signer', description: `changed signer ${before.name}`, before: { name: before.name, email: before.email, type: before.type }, after: { name: signer.name, email: signer.email, type: signer.type } });
+  }
+  for (const [id, signer] of signersBefore) if (!signersAfter.has(id)) events.push({ action: 'signer.removed', entityType: 'signer', description: `removed signer ${signer.name}`, before: { name: signer.name, email: signer.email } });
+
+  const round = value => Math.round(Number(value) * 10000) / 10000;
+  const box = field => ({ x: round(field.x), y: round(field.y), width: round(field.width), height: round(field.height) });
+  const fieldsBefore = new Map(previous.fields.map(field => [String(field._id), field]));
+  const fieldsAfter = new Map(next.fields.map(field => [String(field._id), field]));
+  const label = field => `${field.label || field.type} field`;
+  for (const [id, field] of fieldsAfter) {
+    const before = fieldsBefore.get(id);
+    if (!before) { events.push({ action: 'field.created', entityType: 'field', description: `added a ${field.type} field on page ${field.pageNumber}`, after: { type: field.type, page: field.pageNumber, ...box(field) } }); continue; }
+    if (String(before.signerId) !== String(field.signerId)) {
+      const from = signersBefore.get(String(before.signerId)), to = signersAfter.get(String(field.signerId));
+      events.push({ action: 'field.assignee_changed', entityType: 'field', description: `reassigned the ${label(field)} from ${from?.name || 'unassigned'} to ${to?.name || 'unassigned'}`, before: { signer: from?.name, signerId: String(before.signerId) }, after: { signer: to?.name, signerId: String(field.signerId) } });
+    }
+    const moved = round(before.x) !== round(field.x) || round(before.y) !== round(field.y);
+    const resized = round(before.width) !== round(field.width) || round(before.height) !== round(field.height);
+    if (moved || resized) events.push({ action: resized && !moved ? 'field.resized' : 'field.moved', entityType: 'field', description: `${resized && !moved ? 'resized' : 'moved'} the ${label(field)} on page ${field.pageNumber}`, before: box(before), after: box(field) });
+    if (before.label !== field.label || Boolean(before.required) !== Boolean(field.required) || (before.placeholder || '') !== (field.placeholder || ''))
+      events.push({ action: 'field.updated', entityType: 'field', description: `changed the properties of the ${label(field)}`, before: { label: before.label, required: before.required, placeholder: before.placeholder }, after: { label: field.label, required: field.required, placeholder: field.placeholder } });
+  }
+  for (const [id, field] of fieldsBefore) if (!fieldsAfter.has(id)) events.push({ action: 'field.deleted', entityType: 'field', description: `deleted the ${label(field)} from page ${field.pageNumber}`, before: { type: field.type, page: field.pageNumber, ...box(field) } });
+  return events;
+}
+
+router.put('/:id/design', authenticate, permit('documents.edit'), guard('canEdit'), async (req, res, next) => {
   try {
-    const doc = await SignDocument.findById(req.params.id); if (!doc) return res.sendStatus(404); if (!doc.signers.length) return res.status(400).json({ error: 'Add at least one signer' });
+    const doc = req.document;
+    if (!['Draft', 'Ready to Send'].includes(doc.status)) return res.status(409).json({ error: 'A sent document cannot be redesigned' });
+    if (!Array.isArray(req.body.signers) || !Array.isArray(req.body.fields)) return res.status(400).json({ error: 'Signers and fields are required' });
+    const previous = { signers: doc.signers.map(signer => signer.toObject()), fields: doc.fields.map(field => field.toObject()) };
+    doc.signers = req.body.signers; doc.fields = req.body.fields;
+    doc.status = doc.signers.length && doc.fields.length ? 'Ready to Send' : 'Draft';
+    doc.updatedBy = req.user._id;
+    doc.audits.push(audit(req, 'design_saved', { signerCount: doc.signers.length, fieldCount: doc.fields.length }));
+    await doc.save();
+
+    for (const event of diffDesign(previous, { signers: doc.signers, fields: doc.fields })) {
+      await track(req, doc, event.action, `${req.user.fullName} ${event.description} in "${doc.title}"`, { entityType: event.entityType, before: event.before, after: event.after });
+    }
+    await track(req, doc, 'document.design_saved', `${req.user.fullName} saved "${doc.title}"`, { metadata: { signers: doc.signers.length, fields: doc.fields.length } });
+    res.json(doc);
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/send', authenticate, permit('documents.send'), guard('canSend'), async (req, res, next) => {
+  try {
+    const doc = req.document; if (!doc.signers.length) return res.status(400).json({ error: 'Add at least one signer' });
     const signatureSigners = new Set(doc.fields.filter(f => f.type === 'signature').map(f => String(f.signerId))); const missing = doc.signers.filter(s => !signatureSigners.has(String(s._id))); if (missing.length) return res.status(400).json({ error: 'Every signer must have a signature field' });
     doc.expiresAt = new Date(req.body.expiresAt || Date.now() + Number(process.env.DEFAULT_SIGN_VALID_DAYS || 7) * 86400000); if (doc.expiresAt <= new Date()) return res.status(400).json({ error: 'Expiry must be in the future' });
     const emailPattern=/^[^\s@]+@[^\s@]+\.[^\s@]+$/; const normalizeEmails=value=>Array.isArray(value)?[...new Set(value.map(item=>String(item).trim().toLowerCase()).filter(Boolean))].slice(0,25):[]; const cc=normalizeEmails(req.body.cc),bcc=normalizeEmails(req.body.bcc); const invalid=[...cc,...bcc].find(email=>!emailPattern.test(email)); if(invalid)return res.status(400).json({error:`Invalid CC/BCC email: ${invalid}`});
@@ -104,19 +184,21 @@ router.post('/:id/send', authenticate, permit('sign.send'), async (req, res, nex
     const links = [];
     for (const signer of doc.signers) { const token = crypto.randomBytes(32).toString('base64url'); await SignAccess.create({ documentId: doc._id, signerId: signer._id, tokenHash: hash(token), expiresAt: doc.expiresAt }); const url = `${process.env.APP_URL || 'http://localhost:5173'}/sign/request/${token}`; await mail.sendSignatureRequest({ signer, document: doc, url }); links.push({ signer: signer.email, url: process.env.NODE_ENV === 'production' ? undefined : url }); }
     await mail.sendRequestObservers(doc);
-    doc.audits.push(audit(req, 'request_sent', { recipients: doc.signers.map(s => s.email) })); await doc.save(); res.json({ ok: true, links });
+    doc.audits.push(audit(req, 'request_sent', { recipients: doc.signers.map(s => s.email) })); doc.updatedBy = req.user._id; await doc.save();
+    await track(req, doc, 'document.sent', `${req.user.fullName} sent "${doc.title}" to ${doc.signers.map(s => s.email).join(', ')}`, { metadata: { recipients: doc.signers.map(s => s.email), cc: doc.cc, expiresAt: doc.expiresAt } });
+    res.json({ ok: true, links });
   } catch (e) { next(e); }
 });
 
-router.post('/:id/cancel', authenticate, permit('sign.cancel'), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id); if (!doc) return res.sendStatus(404); doc.status = 'Cancelled'; doc.cancelledAt = new Date(); doc.audits.push(audit(req, 'request_cancelled')); await SignAccess.updateMany({ documentId: doc._id }, { revokedAt: new Date() }); await doc.save(); res.json({ ok: true }); } catch (e) { next(e); } });
-router.delete('/:id', authenticate, permit('sign.delete'), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id); if (!doc) return res.sendStatus(404); await Promise.all([doc.originalFile, doc.signedFile, doc.certificateFile].filter(Boolean).map(file=>fs.unlink(file).catch(()=>{})).concat([SignAccess.deleteMany({ documentId: doc._id }), doc.deleteOne()])); res.json({ ok: true }); } catch (e) { next(e); } });
-router.post('/:id/resend', authenticate, permit('sign.resend'), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id); if (!doc) return res.sendStatus(404); if (!['Pending Signature','Viewed','Partially Signed','Expired'].includes(doc.status)) return res.status(409).json({ error: 'This request cannot be resent' }); const expiresAt = new Date(req.body.expiresAt || Date.now()+Number(process.env.DEFAULT_SIGN_VALID_DAYS||7)*86400000); await SignAccess.updateMany({ documentId: doc._id, revokedAt: null }, { revokedAt: new Date() }); for (const signer of doc.signers.filter(s=>s.status!=='completed')) { const token=crypto.randomBytes(32).toString('base64url'); await SignAccess.create({documentId:doc._id,signerId:signer._id,tokenHash:hash(token),expiresAt}); await mail.sendSignatureRequest({signer,document:doc,url:`${process.env.APP_URL||'http://localhost:5173'}/sign/request/${token}`}); } doc.expiresAt=expiresAt; doc.status='Pending Signature'; doc.audits.push(audit(req,'request_resent')); await doc.save(); res.json({ok:true}); } catch(e){next(e)} });
-router.get('/:id/audit', authenticate, permit('sign.view_audit'), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id).select('referenceNumber title audits'); if (!doc) return res.sendStatus(404); res.json(doc); } catch (e) { next(e); } });
+router.post('/:id/cancel', authenticate, permit('documents.send'), guard('canSend'), async (req, res, next) => { try { const doc = req.document; const before = doc.status; doc.status = 'Cancelled'; doc.cancelledAt = new Date(); doc.updatedBy = req.user._id; doc.audits.push(audit(req, 'request_cancelled')); await SignAccess.updateMany({ documentId: doc._id }, { revokedAt: new Date() }); await doc.save(); await track(req, doc, 'document.cancelled', `${req.user.fullName} cancelled "${doc.title}"`, { before: { status: before }, after: { status: 'Cancelled' } }); res.json({ ok: true }); } catch (e) { next(e); } });
+router.delete('/:id', authenticate, permit('documents.delete'), guard('canDelete'), async (req, res, next) => { try { const doc = req.document; await logAuditEvent({ req, action: 'document.deleted', entityType: 'document', entityId: doc._id, entityLabel: doc.title, documentId: doc._id, description: `${req.user.fullName} deleted "${doc.title}"`, before: { title: doc.title, reference: doc.referenceNumber, status: doc.status } }); await DocumentMember.deleteMany({ documentId: doc._id }); await Promise.all([doc.originalFile, doc.signedFile, doc.certificateFile].filter(Boolean).map(file=>fs.unlink(file).catch(()=>{})).concat([SignAccess.deleteMany({ documentId: doc._id }), doc.deleteOne()])); res.json({ ok: true }); } catch (e) { next(e); } });
+router.post('/:id/resend', authenticate, permit('documents.send'), guard('canSend'), async (req, res, next) => { try { const doc = req.document; if (!['Pending Signature','Viewed','Partially Signed','Expired'].includes(doc.status)) return res.status(409).json({ error: 'This request cannot be resent' }); const expiresAt = new Date(req.body.expiresAt || Date.now()+Number(process.env.DEFAULT_SIGN_VALID_DAYS||7)*86400000); await SignAccess.updateMany({ documentId: doc._id, revokedAt: null }, { revokedAt: new Date() }); for (const signer of doc.signers.filter(s=>s.status!=='completed')) { const token=crypto.randomBytes(32).toString('base64url'); await SignAccess.create({documentId:doc._id,signerId:signer._id,tokenHash:hash(token),expiresAt}); await mail.sendSignatureRequest({signer,document:doc,url:`${process.env.APP_URL||'http://localhost:5173'}/sign/request/${token}`}); } doc.expiresAt=expiresAt; doc.status='Pending Signature'; doc.audits.push(audit(req,'request_resent')); doc.updatedBy=req.user._id; await doc.save(); await track(req, doc, 'document.resent', `${req.user.fullName} resent "${doc.title}"`, { metadata: { expiresAt } }); res.json({ok:true}); } catch(e){next(e)} });
+router.get('/:id/audit', authenticate, permit('documents.view'), guard(), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id).select('referenceNumber title audits').lean(); res.json(doc); } catch (e) { next(e); } });
 
 async function accessFor(req, res) { const access = await SignAccess.findOne({ tokenHash: hash(req.params.token) }); if (!access) { res.status(404).json({ error: 'This signing link is invalid' }); return null; } const doc = await SignDocument.findById(access.documentId); if (!doc) { res.sendStatus(404); return null; } if (doc.status === 'Signed') { res.status(409).json({ error: 'This document has already been signed and completed' }); return null; } if (access.revokedAt || doc.status === 'Cancelled') { res.status(410).json({ error: 'This signing request has been cancelled' }); return null; } if (access.expiresAt < new Date()) { doc.status = 'Expired'; await doc.save(); res.status(410).json({ error: 'This signature request has expired' }); return null; } return { access, doc, signer: doc.signers.id(access.signerId) }; }
-router.get('/request/:token', async (req, res, next) => { try { const found = await accessFor(req, res); if (!found) return; const { access, doc, signer } = found; access.lastAccessedAt = new Date(); signer.status = signer.status === 'pending' ? 'viewed' : signer.status; if (doc.status === 'Pending Signature') doc.status = 'Viewed'; doc.audits.push(audit(req, 'document_viewed', {}, signer._id)); await Promise.all([access.save(), doc.save()]); res.json({ document: { id: doc._id, title: doc.title, pageCount: doc.pageCount, status: doc.status }, signer, fields: doc.fields.filter(f => String(f.signerId) === String(signer._id)).map(f => ({ ...f.toObject(), value: undefined })) }); } catch (e) { next(e); } });
+router.get('/request/:token', async (req, res, next) => { try { const found = await accessFor(req, res); if (!found) return; const { access, doc, signer } = found; access.lastAccessedAt = new Date(); signer.status = signer.status === 'pending' ? 'viewed' : signer.status; if (doc.status === 'Pending Signature') doc.status = 'Viewed'; doc.audits.push(audit(req, 'document_viewed', {}, signer._id)); await Promise.all([access.save(), doc.save()]); await trackSigner(req, doc, signer, 'document.viewed_by_signer', `${signer.name} opened "${doc.title}"`); res.json({ document: { id: doc._id, title: doc.title, pageCount: doc.pageCount, status: doc.status }, signer, fields: doc.fields.filter(f => String(f.signerId) === String(signer._id)).map(f => ({ ...f.toObject(), value: undefined })) }); } catch (e) { next(e); } });
 router.get('/request/:token/pdf', async (req, res, next) => { try { const found = await accessFor(req, res); if (!found) return; res.type('pdf').send(await fs.readFile(found.doc.originalFile)); } catch (e) { next(e); } });
-router.post('/request/:token/decline', async (req,res,next)=>{try{const found=await accessFor(req,res);if(!found)return;const reason=String(req.body.reason||'').trim().slice(0,1000);if(!reason)return res.status(400).json({error:'A decline reason is required'});found.signer.status='declined';found.doc.status='Declined';found.access.revokedAt=new Date();found.doc.audits.push(audit(req,'request_declined',{reason},found.signer._id));await Promise.all([found.access.save(),found.doc.save()]);res.json({ok:true})}catch(e){next(e)}});
+router.post('/request/:token/decline', async (req,res,next)=>{try{const found=await accessFor(req,res);if(!found)return;const reason=String(req.body.reason||'').trim().slice(0,1000);if(!reason)return res.status(400).json({error:'A decline reason is required'});found.signer.status='declined';found.doc.status='Declined';found.access.revokedAt=new Date();found.doc.audits.push(audit(req,'request_declined',{reason},found.signer._id));await Promise.all([found.access.save(),found.doc.save()]);await trackSigner(req,found.doc,found.signer,'document.declined',`${found.signer.name} declined "${found.doc.title}"`,{reason});res.json({ok:true})}catch(e){next(e)}});
 
 router.post('/request/:token/complete', async (req, res, next) => {
   try {
@@ -127,7 +209,68 @@ router.post('/request/:token/complete', async (req, res, next) => {
       const bytes = await pdf.save(); doc.signedFile = await storage.save('signed', Buffer.from(bytes)); doc.signedHash = hash(bytes); doc.status = 'Signed'; doc.completedAt = new Date(); doc.audits.push(audit(req, 'signed_pdf_generated', { sha256: doc.signedHash }), audit(req, 'request_completed'));
       if (process.env.SIGN_CERTIFICATE_ENABLED !== 'false') { const certificate=await PDFDocument.create(); await appendCompletionCertificate(certificate,doc,doc.signedHash); const certificateBytes=await certificate.save(); doc.certificateFile=await storage.save('certificates',Buffer.from(certificateBytes)); doc.certificateHash=hash(certificateBytes); doc.audits.push(audit(req,'completion_certificate_generated',{sha256:doc.certificateHash})); }
       for (const [index, completedSigner] of doc.signers.entries()) { try { await mail.sendCompletion({ signer: completedSigner, document: doc, notifyHr: index === 0 }); doc.audits.push(audit(req,'completion_email_sent',{email:completedSigner.email},completedSigner._id)); } catch(err) { doc.audits.push(audit(req,'email_delivery_failed',{email:completedSigner.email,message:err.message},completedSigner._id)); } }
-    } else doc.status = 'Partially Signed'; await Promise.all([access.save(), doc.save()]); res.json({ ok: true, status: doc.status });
+    } else doc.status = 'Partially Signed'; await Promise.all([access.save(), doc.save()]);
+    await trackSigner(req, doc, signer, 'document.signed_by_signer', `${signer.name} signed "${doc.title}"`, { status: doc.status });
+    if (doc.status === 'Signed') await trackSigner(req, doc, signer, 'document.completed', `"${doc.title}" was completed by all signers`, { reference: doc.referenceNumber });
+    res.json({ ok: true, status: doc.status });
+  } catch (e) { next(e); }
+});
+
+// ------------------------------------------------ document timeline
+
+router.get('/:id/activity', authenticate, permit('documents.view'), guard(), async (req, res, next) => {
+  try {
+    const ActivityLog = require('../models/ActivityLog');
+    const events = await ActivityLog.find({ documentId: req.document._id, companyId: req.user.companyId }).sort({ createdAt: 1 }).limit(500).lean();
+    res.json({ documentId: req.document._id, title: req.document.title, events, audits: req.document.audits });
+  } catch (e) { next(e); }
+});
+
+// ------------------------------------------------- internal sharing
+
+router.get('/:id/members', authenticate, permit('documents.view'), guard(), async (req, res, next) => {
+  try {
+    const members = await DocumentMember.find({ documentId: req.document._id }).lean();
+    const users = await User.find({ _id: { $in: members.map(member => member.userId) } }).select('firstName lastName email status').lean();
+    const byId = new Map(users.map(user => [String(user._id), user]));
+    res.json(members.map(member => {
+      const user = byId.get(String(member.userId));
+      return { id: member._id, userId: member.userId, permission: member.permission, fullName: user ? `${user.firstName} ${user.lastName}`.trim() : 'Removed user', email: user?.email };
+    }));
+  } catch (e) { next(e); }
+});
+
+router.post('/:id/members', authenticate, permit('documents.share'), guard('canShare'), async (req, res, next) => {
+  try {
+    const permission = req.body.permission === 'edit' ? 'edit' : 'view';
+    const user = await User.findOne({ _id: req.body.userId, companyId: req.user.companyId, deletedAt: null });
+    if (!user) return res.status(404).json({ error: 'That colleague is not in your organisation.' });
+    if (String(user._id) === String(req.document.createdByUserId)) return res.status(400).json({ error: 'The owner already has full access.' });
+    const member = await DocumentMember.findOneAndUpdate(
+      { documentId: req.document._id, userId: user._id },
+      { $set: { permission, companyId: req.user.companyId, createdBy: req.user._id } },
+      { upsert: true, new: true },
+    );
+    await track(req, req.document, 'document.shared', `${req.user.fullName} shared "${req.document.title}" with ${user.email} (${permission})`, { metadata: { userId: String(user._id), permission } });
+    res.status(201).json({ id: member._id, userId: user._id, permission, fullName: `${user.firstName} ${user.lastName}`.trim(), email: user.email });
+  } catch (e) { next(e); }
+});
+
+router.delete('/:id/members/:userId', authenticate, permit('documents.share'), guard('canShare'), async (req, res, next) => {
+  try {
+    const member = await DocumentMember.findOneAndDelete({ documentId: req.document._id, userId: req.params.userId });
+    if (!member) return res.status(404).json({ error: 'That colleague does not have access.' });
+    const user = await User.findById(req.params.userId).select('email').lean();
+    await track(req, req.document, 'document.unshared', `${req.user.fullName} removed ${user?.email || 'a colleague'} from "${req.document.title}"`, { metadata: { userId: String(req.params.userId) } });
+    res.json({ ok: true });
+  } catch (e) { next(e); }
+});
+
+// Colleagues who can be given access: everyone else active in the company.
+router.get('/:id/shareable-users', authenticate, permit('documents.share'), guard('canShare'), async (req, res, next) => {
+  try {
+    const users = await User.find({ companyId: req.user.companyId, deletedAt: null, status: 'active', _id: { $ne: req.document.createdByUserId } }).select('firstName lastName email').sort({ firstName: 1 }).lean();
+    res.json(users.map(user => ({ id: user._id, fullName: `${user.firstName} ${user.lastName}`.trim(), email: user.email })));
   } catch (e) { next(e); }
 });
 

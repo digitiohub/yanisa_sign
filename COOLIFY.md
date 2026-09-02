@@ -79,9 +79,14 @@ Open app resource **Environment Variables**. Add each item below as runtime vari
 | --- | --- |
 | `MONGO_URI` | Internal URL from Step 2, with `signapp`, `authSource=admin`, and any URL-encoded credentials |
 | `JWT_SECRET` | Unique random value, minimum 32 characters |
-| `ADMIN_EMAIL` | Initial HR administrator email address |
-| `ADMIN_PASSWORD` | Unique, long admin password |
+| `ADMIN_EMAIL` | Email of the first Super Admin, seeded on first boot |
+| `ADMIN_PASSWORD` | Unique, long password for that account |
+| `COMPANY_NAME` | Organisation name, e.g. `Yanisa`. Defaults to `Yanisa` |
 | `APP_URL` | Exact public HTTPS URL, e.g. `https://sign.example.com` |
+
+`ADMIN_EMAIL` and `ADMIN_PASSWORD` seed one account the first time the app starts against an empty database. Every other user is invited from **Administration > Users** and sets their own password, so the seeded password is only needed for the first sign-in. Changing these variables later does not change an existing account.
+
+Optional variables with production-ready defaults: `ACCESS_TOKEN_TTL` (30m), `REFRESH_TOKEN_DAYS` (7), `OTP_TTL_MINUTES` (10), `OTP_MAX_ATTEMPTS` (5), `OTP_RESEND_SECONDS` (45), `MAX_FAILED_LOGINS` (5), `LOGIN_LOCK_MINUTES` (15) and the `RATE_LIMIT_*` limits. See `.env.example`.
 
 Generate secrets with password manager. On Windows PowerShell, use this for `JWT_SECRET`:
 
@@ -127,15 +132,20 @@ Optional app variables: `MAX_PDF_SIZE_MB=20`, `DEFAULT_SIGN_VALID_DAYS=7`, `SIGN
    ```
 
 3. Open `https://sign.example.com` and log in using `ADMIN_EMAIL` and `ADMIN_PASSWORD`.
-4. Upload non-sensitive test PDF.
-5. Send it to controlled email address.
-6. Confirm email link starts with exact `APP_URL`, opens signing page, and completes successfully.
+4. Open **Administration > Users**, invite one colleague, and confirm the invitation email arrives with a 6-digit code.
+5. Complete that invitation in a private window: verify the code, set a password, sign in.
+6. Upload non-sensitive test PDF.
+7. Send it to controlled email address.
+8. Confirm email link starts with exact `APP_URL`, opens signing page, and completes successfully.
+9. Check **Administration > Activity** shows the upload, the send and the signer opening the document.
 
 ## Problems
 
 | Symptom | Check |
 | --- | --- |
 | App stops at deploy | Required `MONGO_URI`, `JWT_SECRET`, `ADMIN_EMAIL`, or `ADMIN_PASSWORD` missing |
+| Invitations and reset codes never arrive | SMTP variables missing. Without SMTP the server refuses to send in production; users cannot activate accounts |
+| Users are signed out unexpectedly | Expected after a role change, a password change, a deactivation or an access reset. Otherwise check that `JWT_SECRET` did not change |
 | `getaddrinfo EAI_AGAIN` / `ENOTFOUND` | Enable **Connect to Predefined Network** on app resource. Keep internal hostname exactly as Coolify displays it |
 | Health shows `database: "disconnected"` | Verify both resources share Coolify server/destination and app network setting is enabled |
 | `Authentication failed` | Use exact `MONGO_INITDB_ROOT_USERNAME` and `MONGO_INITDB_ROOT_PASSWORD`; URL-encode credentials; verify URI ends in `?authSource=admin` |
@@ -150,4 +160,4 @@ Optional app variables: `MAX_PDF_SIZE_MB=20`, `DEFAULT_SIGN_VALID_DAYS=7`, `SIGN
 3. Test restoration on non-production server.
 4. Normal application redeploys retain `sign-storage`. Do not use destructive volume/resource cleanup.
 5. If rotating Mongo credentials, update Mongo first, then replace app `MONGO_URI` and redeploy app.
-6. If rotating `JWT_SECRET`, all active app admin sessions are invalidated.
+6. If rotating `JWT_SECRET`, every active session is invalidated and everyone signs in again. Stored passwords are unaffected.

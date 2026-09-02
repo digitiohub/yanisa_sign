@@ -1,70 +1,313 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import * as pdfjs from 'pdfjs-dist';
-import { AlignLeft, ArrowLeft, Building2, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Download, FileSignature, FileText, GripVertical, Loader2, LogOut, Mail, Minus, MoreVertical, PenLine, Phone, Plus, Search, Send, Share2, ShieldCheck, Stamp, Strikethrough, Trash2, Type, Upload, User, X } from 'lucide-react';
-import axios from 'axios';
+import { Activity, AlignLeft, ArrowLeft, Building2, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Download, FileSignature, FileText, Loader2, LogOut, Mail, Minus, MoreVertical, PenLine, Phone, Plus, Search, Send, Share2, ShieldCheck, Stamp, Strikethrough, Trash2, Type, Upload, User, X } from 'lucide-react';
+import { FALLBACK_PAGE, calculateDrag, calculateResize, clampFieldToPage, getContentFieldSize, sizeToFractions } from './fieldGeometry';
+import { api, errorText, formatDate, formatDateTime, getAccessToken, initials } from './api';
+import { AuthProvider, Protected, useAuth } from './auth-context';
+import { AcceptInvitePage, ForgotPasswordPage, LoginPage } from './auth-pages';
+import { MyActivityPage, ProfilePage, SecurityPage } from './profile-pages';
+import { ActivityPage, AdminDashboard, AuditPage, RolesPage, UserDetailPage, UsersPage } from './admin-pages';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
-const api = axios.create({ baseURL: '/api' });
-api.interceptors.request.use(c => { const token = localStorage.getItem('sign_token'); if (token) c.headers.Authorization = `Bearer ${token}`; return c; });
 const fieldTypes = ['signature', 'initials', 'name', 'email', 'phone', 'company', 'text', 'multiline', 'checkbox', 'radio', 'selection', 'date', 'strikethrough', 'stamp'];
 const fieldColors = ['#1d4ed8', '#0f766e', '#b45309', '#be185d'];
 const fieldIcons = {signature:PenLine,initials:PenLine,name:User,email:Mail,phone:Phone,company:Building2,text:Type,multiline:AlignLeft,checkbox:CheckSquare2,radio:CircleDot,selection:ChevronDown,date:CalendarDays,strikethrough:Strikethrough,stamp:Stamp};
-const errorText = e => e.response?.data?.error || 'Something went wrong. Please try again.';
 const newObjectId = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
 
 function Shell({ children }) {
   const navigate = useNavigate();
-  return <div className="min-h-screen bg-slate-50 text-slate-900"><header className="sticky top-0 z-30 border-t-[3px] border-brand-600 bg-white"><div className="flex h-14 items-center justify-between border-b border-slate-200 px-4"><div className="flex items-center gap-7"><button onClick={() => navigate('/')} className="flex items-center gap-2"><span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600"><FileSignature size={19}/></span><b className="text-lg">Sign</b></button><nav className="hidden items-center gap-7 text-sm font-medium md:flex"><button onClick={()=>navigate('/')}>Documents</button><button>Templates</button><button>Reports</button><button>Configuration</button></nav></div><div className="flex items-center gap-3"><span className="hidden text-sm text-slate-600 sm:inline">Yanisa Sign</span><span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-600 text-sm font-bold text-white">S</span><button onClick={() => { localStorage.removeItem('sign_token'); navigate('/login'); }} className="icon-button" title="Sign out"><LogOut size={18}/></button></div></div></header>{children}</div>;
-}
+  const auth = useAuth();
+  const [menuOpen, setMenuOpen] = useState(false);
+  // Templates and Reports are still placeholders, so they stay inert rather
+  // than pretending to lead somewhere.
+  const nav = [
+    ['/', 'Documents', null, null, true],
+    [null, 'Templates', 'templates.view'],
+    [null, 'Reports', 'reports.view'],
+    ['/admin', 'Administration', null, ['users.view', 'activity.view', 'audit.view', 'roles.view'], true],
+  ].filter(([, , permission, anyOf]) => (!permission || auth.can(permission)) && (!anyOf || auth.canAny(anyOf)));
 
-function Login() {
-  const [form, setForm] = useState({ email: '', password: '' }); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const navigate = useNavigate();
-  const submit = async e => { e.preventDefault(); setBusy(true); setError(''); try { const { data } = await api.post('/auth/login', form); localStorage.setItem('sign_token', data.token); navigate('/'); } catch (x) { setError(errorText(x)); } finally { setBusy(false); } };
-  return <div className="grid min-h-screen place-items-center bg-slate-100 p-5"><form onSubmit={submit} className="w-full max-w-md rounded-3xl border border-slate-200 bg-white p-8 shadow-xl shadow-slate-200/50"><span className="grid h-12 w-12 place-items-center rounded-2xl bg-brand-600 text-white"><FileSignature/></span><h1 className="mt-6 text-2xl font-semibold">Welcome to Yanisa Sign</h1><p className="mt-2 text-sm text-slate-500">Sign in with your HR administrator account.</p>{error && <div className="error-box">{error}</div>}<label className="field-label">Email<input type="email" required value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/></label><label className="field-label">Password<input type="password" required value={form.password} onChange={e=>setForm({...form,password:e.target.value})}/></label><button disabled={busy} className="primary-button mt-6 w-full">{busy && <Loader2 className="animate-spin" size={17}/>}Sign in</button></form></div>;
+  return <div className="min-h-screen bg-slate-50 text-slate-900">
+    <header className="sticky top-0 z-30 border-t-[3px] border-brand-600 bg-white">
+      <div className="flex h-14 items-center justify-between border-b border-slate-200 px-4">
+        <div className="flex items-center gap-7">
+          <button onClick={() => navigate('/')} className="flex items-center gap-2">
+            <span className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-600"><FileSignature size={19}/></span>
+            <b className="text-lg">Sign</b>
+          </button>
+          <nav className="hidden items-center gap-7 text-sm font-medium md:flex">
+            {nav.map(([to, label]) => <button key={label} onClick={() => to && navigate(to)} className={to ? '' : 'text-slate-400'} title={to ? undefined : 'Coming soon'}>{label}</button>)}
+          </nav>
+        </div>
+        <div className="relative flex items-center gap-3">
+          <span className="hidden text-right text-sm sm:block">
+            <b className="block leading-tight">{auth.user?.fullName}</b>
+            <small className="text-slate-500">{auth.user?.role?.name}</small>
+          </span>
+          <button className="avatar" onClick={() => setMenuOpen(!menuOpen)} title="Account">{initials(auth.user)}</button>
+          {menuOpen && <div className="menu right-0 top-12" onMouseLeave={() => setMenuOpen(false)}>
+            <button onClick={() => { setMenuOpen(false); navigate('/profile'); }}>My profile</button>
+            <button onClick={() => { setMenuOpen(false); navigate('/profile/security'); }}>Security and sessions</button>
+            <button onClick={() => { setMenuOpen(false); navigate('/profile/activity'); }}>My activity</button>
+            <button className="danger" onClick={async () => { setMenuOpen(false); await auth.signOut(); navigate('/login'); }}>Sign out</button>
+          </div>}
+        </div>
+      </div>
+    </header>
+    {children}
+  </div>;
 }
 
 function Dashboard() {
-  const [docs, setDocs] = useState([]), [status, setStatus] = useState(''), [q, setQ] = useState(''), [busy, setBusy] = useState(true), [error, setError] = useState(''); const uploadRef = useRef(); const navigate = useNavigate();
-  const load = async () => { setBusy(true); try { const { data } = await api.get('/sign', { params: { status: status || undefined, q: q || undefined } }); setDocs(data); } catch(e) { if(e.response?.status===401) navigate('/login'); else setError(errorText(e)); } finally { setBusy(false); } };
-  useEffect(()=>{ load(); },[status]);
-  const upload = async e => { const file=e.target.files?.[0]; if(!file)return; setBusy(true); const body=new FormData(); body.append('pdf',file); try { const {data}=await api.post('/sign/upload',body); navigate(`/documents/${data._id}/design`); } catch(x){setError(errorText(x));setBusy(false);} };
-  const download=async d=>{try{const {data}=await api.get(`/sign/${d._id}/pdf`,{params:{signed:d.status==='Signed'},responseType:'blob'});const url=URL.createObjectURL(data),a=document.createElement('a');a.href=url;a.download=`${d.referenceNumber}-${d.status==='Signed'?'signed':'original'}.pdf`;a.click();URL.revokeObjectURL(url)}catch(e){setError(errorText(e))}};
-  const act=async(d,type)=>{const message=type==='delete'?`Permanently delete "${d.title}"? This cannot be undone.`:`Cancel ${d.title}?`;if(!confirm(message))return;try{type==='delete'?await api.delete(`/sign/${d._id}`):await api.post(`/sign/${d._id}/cancel`);load()}catch(e){setError(errorText(e))}};
-  const stats = useMemo(()=>({draft:docs.filter(d=>d.status==='Draft').length,pending:docs.filter(d=>['Pending Signature','Viewed','Partially Signed'].includes(d.status)).length,signed:docs.filter(d=>d.status==='Signed').length}),[docs]);
-  return <Shell><main className="mx-auto max-w-[1500px] p-5 lg:p-8"><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="eyebrow">Documents</p><h1 className="text-3xl font-semibold tracking-tight">Sign documents</h1><p className="mt-2 text-slate-500">Prepare, send and track secure signature requests.</p></div><button onClick={()=>uploadRef.current.click()} className="primary-button"><Upload size={17}/>Upload PDF</button><input ref={uploadRef} hidden type="file" accept="application/pdf,.pdf" onChange={upload}/></div>
-  <div className="mt-8 grid gap-4 sm:grid-cols-3">{[['Drafts',stats.draft,FileText],['Awaiting signatures',stats.pending,Send],['Completed',stats.signed,ShieldCheck]].map(([l,v,I])=><div key={l} className="card flex items-center gap-4"><span className="grid h-11 w-11 place-items-center rounded-2xl bg-brand-50 text-brand-600"><I size={20}/></span><div><b className="text-2xl">{v}</b><p className="text-sm text-slate-500">{l}</p></div></div>)}</div>
-  {error&&<div className="error-box">{error}</div>}<div className="card mt-6 p-0"><div className="flex flex-wrap gap-3 border-b border-slate-200 p-4"><div className="relative min-w-64 flex-1"><Search className="absolute left-3 top-2.5 text-slate-400" size={18}/><input className="w-full pl-10" placeholder="Search name, signer, email or reference" value={q} onChange={e=>setQ(e.target.value)} onKeyDown={e=>e.key==='Enter'&&load()}/></div><div className="flex gap-1 rounded-xl bg-slate-100 p-1">{['','Draft','Pending Signature','Signed','Expired'].map(s=><button key={s} onClick={()=>setStatus(s)} className={`rounded-lg px-3 py-2 text-sm ${status===s?'bg-white font-medium shadow-sm':'text-slate-500'}`}>{s||'All'}</button>)}</div></div>
-  <div className="overflow-x-auto"><table><thead><tr><th>Document</th><th>Signer</th><th>Status</th><th>Valid until</th><th>Updated</th><th></th></tr></thead><tbody>{busy?<tr><td colSpan="6" className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600"/></td></tr>:docs.length===0?<tr><td colSpan="6" className="py-16 text-center text-slate-500">No signing documents yet. Upload your first PDF.</td></tr>:docs.map(d=><tr key={d._id}><td><b>{d.title}</b><small className="block text-slate-500">{d.referenceNumber}</small></td><td>{d.signers?.[0]?.name||'Not assigned'}</td><td><span className={`status status-${d.status.toLowerCase().replaceAll(' ','-')}`}>{d.status}</span></td><td>{d.expiresAt?new Date(d.expiresAt).toLocaleDateString():'—'}</td><td>{new Date(d.updatedAt).toLocaleDateString()}</td><td><div className="flex gap-1"><button className="secondary-button" onClick={()=>navigate(`/documents/${d._id}/design`)}>Open</button><button className="icon-button" title="Download" onClick={()=>download(d)}><Download size={17}/></button>{['Pending Signature','Viewed','Partially Signed'].includes(d.status)&&<button className="icon-button text-red-600" title="Cancel" onClick={()=>act(d,'cancel')}><X size={17}/></button>}<button className="icon-button text-red-600" title="Delete document" aria-label={`Delete ${d.title}`} onClick={()=>act(d,'delete')}><Trash2 size={17}/></button></div></td></tr>)}</tbody></table></div></div></main></Shell>;
+  const auth = useAuth();
+  const navigate = useNavigate();
+  const uploadRef = useRef();
+  const [docs, setDocs] = useState([]);
+  const [filters, setFilters] = useState({ status: '', q: '', ownerId: '', workspaceId: '' });
+  const [people, setPeople] = useState([]);
+  const [teams, setTeams] = useState([]);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState('');
+
+  // Only someone who can see the whole organisation gets the user/team filters.
+  const orgWide = auth.can('documents.view_all');
+
+  const load = async () => {
+    setBusy(true);
+    try {
+      const params = Object.fromEntries(Object.entries(filters).filter(([, value]) => value));
+      const { data } = await api.get('/sign', { params });
+      setDocs(data);
+    } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
+  };
+  useEffect(() => { load(); }, [filters.status, filters.ownerId, filters.workspaceId]);
+  useEffect(() => {
+    if (!orgWide || !auth.can('users.view')) return;
+    api.get('/admin/users', { params: { limit: 200 } }).then(({ data }) => setPeople(data.users)).catch(() => {});
+    api.get('/admin/workspaces').then(({ data }) => setTeams(data)).catch(() => {});
+  }, [orgWide]);
+
+  const upload = async event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    const body = new FormData();
+    body.append('pdf', file);
+    try { const { data } = await api.post('/sign/upload', body); navigate(`/documents/${data._id}/design`); }
+    catch (failure) { setError(errorText(failure)); setBusy(false); }
+  };
+  const download = async doc => {
+    try {
+      const { data } = await api.get(`/sign/${doc._id}/pdf`, { params: { signed: doc.status === 'Signed', download: true }, responseType: 'blob' });
+      const url = URL.createObjectURL(data), link = document.createElement('a');
+      link.href = url; link.download = `${doc.referenceNumber}-${doc.status === 'Signed' ? 'signed' : 'original'}.pdf`; link.click();
+      URL.revokeObjectURL(url);
+    } catch (failure) { setError(errorText(failure)); }
+  };
+  const act = async (doc, type) => {
+    const message = type === 'delete' ? `Permanently delete "${doc.title}"? This cannot be undone.` : `Cancel ${doc.title}?`;
+    if (!confirm(message)) return;
+    try { if (type === 'delete') await api.delete(`/sign/${doc._id}`); else await api.post(`/sign/${doc._id}/cancel`); load(); }
+    catch (failure) { setError(errorText(failure)); }
+  };
+  const stats = useMemo(() => ({
+    draft: docs.filter(doc => doc.status === 'Draft').length,
+    pending: docs.filter(doc => ['Pending Signature', 'Viewed', 'Partially Signed'].includes(doc.status)).length,
+    signed: docs.filter(doc => doc.status === 'Signed').length,
+  }), [docs]);
+
+  return <Shell><main className="mx-auto max-w-[1500px] p-5 lg:p-8">
+    <div className="flex flex-wrap items-end justify-between gap-4">
+      <div>
+        <p className="eyebrow">Documents</p>
+        <h1 className="text-3xl font-semibold tracking-tight">{orgWide ? 'All documents' : 'My documents'}</h1>
+        <p className="mt-2 text-slate-500">{orgWide ? 'Every signature request in your organisation.' : 'Documents you own or that were shared with you.'}</p>
+      </div>
+      {auth.can('documents.create') && <>
+        <button onClick={() => uploadRef.current.click()} className="primary-button"><Upload size={17} />Upload PDF</button>
+        <input ref={uploadRef} hidden type="file" accept="application/pdf,.pdf" onChange={upload} />
+      </>}
+    </div>
+
+    <div className="mt-8 grid gap-4 sm:grid-cols-3">
+      {[['Drafts', stats.draft, FileText], ['Awaiting signatures', stats.pending, Send], ['Completed', stats.signed, ShieldCheck]].map(([label, value, Icon]) => (
+        <div key={label} className="card flex items-center gap-4">
+          <span className="grid h-11 w-11 place-items-center rounded-2xl bg-brand-50 text-brand-600"><Icon size={20} /></span>
+          <div><b className="text-2xl">{value}</b><p className="text-sm text-slate-500">{label}</p></div>
+        </div>
+      ))}
+    </div>
+
+    {error && <div className="error-box">{error}</div>}
+    <div className="card mt-6 p-0">
+      <div className="flex flex-wrap gap-3 border-b border-slate-200 p-4">
+        <div className="relative min-w-64 flex-1">
+          <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
+          <input className="w-full pl-10" placeholder="Search name, signer, email or reference" value={filters.q}
+            onChange={event => setFilters({ ...filters, q: event.target.value })} onKeyDown={event => event.key === 'Enter' && load()} />
+        </div>
+        {orgWide && people.length > 0 && <select value={filters.ownerId} onChange={event => setFilters({ ...filters, ownerId: event.target.value })}>
+          <option value="">All users</option>
+          {people.map(person => <option key={person.id} value={person.id}>{person.fullName}</option>)}
+        </select>}
+        {orgWide && teams.length > 0 && <select value={filters.workspaceId} onChange={event => setFilters({ ...filters, workspaceId: event.target.value })}>
+          <option value="">All teams</option>
+          {teams.map(team => <option key={team._id} value={team._id}>{team.name}</option>)}
+        </select>}
+        <div className="flex gap-1 rounded-xl bg-slate-100 p-1">
+          {['', 'Draft', 'Pending Signature', 'Signed', 'Expired'].map(status => (
+            <button key={status} onClick={() => setFilters({ ...filters, status })}
+              className={`rounded-lg px-3 py-2 text-sm ${filters.status === status ? 'bg-white font-medium shadow-sm' : 'text-slate-500'}`}>{status || 'All'}</button>
+          ))}
+        </div>
+      </div>
+      <div className="overflow-x-auto">
+        <table>
+          <thead><tr><th>Document</th><th>Created by</th><th>Signers</th><th>Status</th><th>Valid until</th><th>Updated</th><th /></tr></thead>
+          <tbody>
+            {busy ? <tr><td colSpan="7" className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600" /></td></tr>
+              : docs.length === 0 ? <tr><td colSpan="7" className="py-16 text-center text-slate-500">No documents here yet.</td></tr>
+                : docs.map(doc => <tr key={doc._id}>
+                  <td><b>{doc.title}</b><small className="block text-slate-500">{doc.referenceNumber}</small></td>
+                  <td>{doc.owner?.fullName || doc.createdBy}<small className="block text-slate-500">{doc.sentAt ? `Sent ${formatDate(doc.sentAt)}` : `Created ${formatDate(doc.createdAt)}`}</small></td>
+                  <td>{doc.signers?.length ? `${doc.signers.length} · ${doc.signers[0].name}` : 'Not assigned'}</td>
+                  <td><span className={`status status-${doc.status.toLowerCase().replaceAll(' ', '-')}`}>{doc.status}</span></td>
+                  <td>{doc.expiresAt ? formatDate(doc.expiresAt) : '—'}</td>
+                  <td>{formatDate(doc.updatedAt)}</td>
+                  <td>
+                    <div className="flex gap-1">
+                      <button className="secondary-button" onClick={() => navigate(`/documents/${doc._id}/design`)}>Open</button>
+                      {auth.can('documents.download') && <button className="icon-button" title="Download" onClick={() => download(doc)}><Download size={17} /></button>}
+                      {auth.can('documents.send') && ['Pending Signature', 'Viewed', 'Partially Signed'].includes(doc.status) && <button className="icon-button text-red-600" title="Cancel" onClick={() => act(doc, 'cancel')}><X size={17} /></button>}
+                      {auth.can('documents.delete') && <button className="icon-button text-red-600" title="Delete document" aria-label={`Delete ${doc.title}`} onClick={() => act(doc, 'delete')}><Trash2 size={17} /></button>}
+                    </div>
+                  </td>
+                </tr>)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main></Shell>;
 }
 
-function PdfPages({ url, fields=[], onDrop, onFieldClick, onFieldChange, onFieldDelete=(fieldId)=>onFieldChange?.(fieldId,{__delete:true}), selected, interactive=false, values={}, onValue, zoom=1 }) {
-  const [pages,setPages]=useState([]); useEffect(()=>{let live=true; pdfjs.getDocument({url,httpHeaders:localStorage.getItem('sign_token')?{Authorization:`Bearer ${localStorage.getItem('sign_token')}`}:{}}).promise.then(async pdf=>{const list=[];for(let i=1;i<=pdf.numPages;i++){const page=await pdf.getPage(i);const viewport=page.getViewport({scale:1.35*zoom});const canvas=document.createElement('canvas');canvas.width=viewport.width;canvas.height=viewport.height;await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;list.push({number:i,url:canvas.toDataURL(),ratio:viewport.height/viewport.width});}if(live)setPages(list)});return()=>{live=false}},[url,zoom]);
-  const startPointer=(e,f,resize=false)=>{if(interactive||!onFieldChange)return;e.preventDefault();e.stopPropagation();onFieldClick?.(f);const host=e.currentTarget.parentElement.getBoundingClientRect(),sx=e.clientX,sy=e.clientY,origin={...f};const move=ev=>{const dx=(ev.clientX-sx)/host.width,dy=(ev.clientY-sy)/host.height;onFieldChange(f._id,resize?{width:Math.max(.04,Math.min(1-origin.x,origin.width+dx)),height:Math.max(.025,Math.min(1-origin.y,origin.height+dy))}:{x:Math.max(0,Math.min(1-origin.width,origin.x+dx)),y:Math.max(0,Math.min(1-origin.height,origin.y+dy))})};const up=()=>{window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up)};window.addEventListener('pointermove',move);window.addEventListener('pointerup',up)};
-  return <div className="space-y-6">{pages.map(p=><div key={p.number} className="pdf-page" style={{aspectRatio:`1/${p.ratio}`}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const type=e.dataTransfer.getData('fieldType');if(!type||!onDrop)return;const r=e.currentTarget.getBoundingClientRect();onDrop(type,p.number,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height)}}><img src={p.url}/>{fields.filter(f=>f.pageNumber===p.number).map((f,i)=><div key={f._id||i} onPointerDown={e=>startPointer(e,f)} onClick={()=>onFieldClick?.(f)} className={`placed-field ${interactive?'interactive':''} ${selected===f._id?'selected':''}`} style={{left:`${f.x*100}%`,top:`${f.y*100}%`,width:`${f.width*100}%`,height:`${f.height*100}%`,borderColor:fieldColors[f.signerIndex||0]}}>{interactive?<FieldInput field={f} value={values[f._id]} onChange={v=>onValue(f,v)}/>:<><GripVertical size={13}/><span>{f.label||f.type}</span>{f.required&&<b>*</b>}{selected===f._id&&<button className="field-delete" title="Delete field" onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();onFieldDelete?.(f._id)}}><Trash2 size={14}/></button>}<i title="Drag to resize" onPointerDown={e=>startPointer(e,f,true)}/></>}</div>)}</div>)}</div>;
+function PdfPages({ url, fields=[], onDrop, onPages, onFieldClick, onFieldChange, onFieldDelete=(fieldId)=>onFieldChange?.(fieldId,{__delete:true}), selected, interactive=false, values={}, onValue, zoom=1 }) {
+  const [pages,setPages]=useState([]); useEffect(()=>{let live=true; pdfjs.getDocument({url,httpHeaders:getAccessToken()?{Authorization:`Bearer ${getAccessToken()}`}:{}}).promise.then(async pdf=>{const list=[];for(let i=1;i<=pdf.numPages;i++){const page=await pdf.getPage(i);const viewport=page.getViewport({scale:1.35*zoom});const canvas=document.createElement('canvas');canvas.width=viewport.width;canvas.height=viewport.height;await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;list.push({number:i,url:canvas.toDataURL(),ratio:viewport.height/viewport.width,baseWidth:viewport.width/zoom,baseHeight:viewport.height/zoom});}if(live){setPages(list);onPages?.(list)}});return()=>{live=false}},[url,zoom]);
+  const startPointer=(e,f,mode='move')=>{if(interactive||!onFieldChange)return;const pageEl=e.currentTarget.closest('.pdf-page');if(!pageEl)return;e.preventDefault();e.stopPropagation();onFieldClick?.(f);const handle=e.currentTarget,pointerId=e.pointerId,origin={...f},rect=pageEl.getBoundingClientRect(),rendered=pages.find(p=>p.number===f.pageNumber),page={width:rect.width,height:rect.height,baseWidth:rendered?.baseWidth||rect.width,baseHeight:rendered?.baseHeight||rect.height},sx=e.clientX,sy=e.clientY,restoreSelect=document.body.style.userSelect;document.body.style.userSelect='none';try{handle.setPointerCapture(pointerId)}catch{}
+    const move=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy,snap=!ev.altKey;onFieldChange(f._id,mode==='resize'?calculateResize({origin,dx,dy,page,type:f.type,snap}):calculateDrag({origin,dx,dy,page,snap}))};
+    const up=()=>{try{handle.releasePointerCapture(pointerId)}catch{}document.body.style.userSelect=restoreSelect;window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',up)};
+    window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);window.addEventListener('pointercancel',up)};
+  return <div className="space-y-6">{pages.map(p=><div key={p.number} className="pdf-page" style={{aspectRatio:`1/${p.ratio}`}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const type=e.dataTransfer.getData('fieldType');if(!type||!onDrop)return;const r=e.currentTarget.getBoundingClientRect();onDrop(type,p.number,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height)}}><img src={p.url}/>{fields.filter(f=>f.pageNumber===p.number).map((f,i)=>{const FieldIcon=fieldIcons[f.type]||Type;return <div key={f._id||i} data-field-type={f.type} onPointerDown={e=>startPointer(e,f)} onClick={()=>onFieldClick?.(f)} className={`placed-field ${interactive?'interactive':''} ${selected===f._id?'selected':''}`} style={{left:`${f.x*100}%`,top:`${f.y*100}%`,width:`${f.width*100}%`,height:`${f.height*100}%`,borderColor:fieldColors[f.signerIndex||0]}}>{interactive?<FieldInput field={f} value={values[f._id]} onChange={v=>onValue(f,v)}/>:<><FieldIcon className="field-icon" size={13}/><span className="field-text">{f.label||f.type}</span>{f.required&&<b className="field-required">*</b>}{selected===f._id&&<button className="field-delete" title="Delete field" onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();onFieldDelete?.(f._id)}}><Trash2 size={14}/></button>}<i title="Drag to resize" onPointerDown={e=>startPointer(e,f,'resize')}/></>}</div>})}</div>)}</div>;
 }
 function FieldInput({field,value,onChange}) { const [open,setOpen]=useState(false); if(['signature','initials','stamp'].includes(field.type)) return <><button className="h-full w-full bg-brand-50 text-xs font-semibold text-brand-700" onClick={()=>setOpen(true)}>{value?<img className="h-full w-full object-contain" src={value}/>:`Click to add ${field.type} *`}</button>{open&&<SignatureModal title={field.type} onClose={()=>setOpen(false)} onApply={v=>{onChange(v);setOpen(false)}}/>}</>; if(field.type==='checkbox'||field.type==='radio') return <input type="checkbox" checked={!!value} onChange={e=>onChange(e.target.checked)}/>; return <input className="h-full w-full border-0 bg-amber-50/80 p-1 text-xs" type={field.type==='date'?'date':'text'} value={value||''} placeholder={field.placeholder||field.label} onChange={e=>onChange(e.target.value)}/>; }
 
 function SignatureModal({title,onClose,onApply}) { const canvas=useRef(),[tab,setTab]=useState('draw'),[typed,setTyped]=useState(''),[upload,setUpload]=useState(''); useEffect(()=>{if(tab!=='draw'||!canvas.current)return;const c=canvas.current,ctx=c.getContext('2d');ctx.lineWidth=3;ctx.lineCap='round';ctx.strokeStyle='#0f172a';let drawing=false;const point=e=>{const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height]};const down=e=>{drawing=true;ctx.beginPath();ctx.moveTo(...point(e));c.setPointerCapture(e.pointerId)};const move=e=>{if(drawing){ctx.lineTo(...point(e));ctx.stroke()}};const up=()=>drawing=false;c.addEventListener('pointerdown',down);c.addEventListener('pointermove',move);c.addEventListener('pointerup',up);return()=>{c.removeEventListener('pointerdown',down);c.removeEventListener('pointermove',move);c.removeEventListener('pointerup',up)}},[tab]);const typedImage=()=>{const c=document.createElement('canvas');c.width=700;c.height=180;const x=c.getContext('2d');x.font='italic 64px cursive';x.fillStyle='#0f172a';x.textAlign='center';x.textBaseline='middle';x.fillText(typed,350,90);return c.toDataURL('image/png')};const apply=()=>{const value=tab==='draw'?canvas.current?.toDataURL('image/png'):tab==='type'&&typed?typedImage():upload;if(value)onApply(value)};return <div className="modal-backdrop"><div className="modal max-w-xl"><div className="flex justify-between"><div><p className="eyebrow">Add your {title}</p><h2 className="text-xl font-semibold capitalize">Create {title}</h2></div><button onClick={onClose}><X/></button></div><div className="mt-5 flex gap-1 rounded-xl bg-slate-100 p-1">{['draw','type','upload'].map(t=><button key={t} onClick={()=>setTab(t)} className={`flex-1 rounded-lg px-3 py-2 text-sm capitalize ${tab===t?'bg-white font-semibold shadow-sm':''}`}>{t}</button>)}</div><div className="mt-4 h-52 rounded-xl border bg-slate-50">{tab==='draw'&&<canvas ref={canvas} width="700" height="250" className="h-full w-full touch-none"/>}{tab==='type'&&<div className="grid h-full place-items-center p-5"><input className="w-full text-center font-serif text-3xl italic" placeholder="Type your full name" value={typed} onChange={e=>setTyped(e.target.value)}/></div>}{tab==='upload'&&<div className="grid h-full place-items-center p-5"><label className="secondary-button cursor-pointer"><Upload size={17}/>Choose PNG or JPG<input hidden type="file" accept="image/png,image/jpeg" onChange={e=>{const f=e.target.files?.[0];if(!f||f.size>2*1024*1024)return;const r=new FileReader();r.onload=()=>setUpload(r.result);r.readAsDataURL(f)}}/></label>{upload&&<img className="max-h-24 max-w-full" src={upload}/>}</div>}</div><div className="mt-5 flex justify-between"><button className="secondary-button" onClick={()=>{if(canvas.current)canvas.current.getContext('2d').clearRect(0,0,canvas.current.width,canvas.current.height);setTyped('');setUpload('')}}>Clear</button><div className="flex gap-2"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button capitalize" onClick={apply}>Apply {title}</button></div></div></div></div>}
 
+// Internal sharing: give a colleague view or edit access to one document.
+function ShareModal({ documentId, onClose }) {
+  const [members, setMembers] = useState([]);
+  const [people, setPeople] = useState([]);
+  const [form, setForm] = useState({ userId: '', permission: 'view' });
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    api.get(`/sign/${documentId}/members`).then(({ data }) => setMembers(data)).catch(failure => setError(errorText(failure)));
+    api.get(`/sign/${documentId}/shareable-users`).then(({ data }) => setPeople(data)).catch(() => {});
+  }, [documentId]);
+  useEffect(() => { load(); }, [load]);
+
+  const share = async () => {
+    if (!form.userId) return;
+    setBusy(true); setError('');
+    try { await api.post(`/sign/${documentId}/members`, form); setForm({ userId: '', permission: 'view' }); load(); }
+    catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
+  };
+  const revoke = async userId => {
+    try { await api.delete(`/sign/${documentId}/members/${userId}`); load(); }
+    catch (failure) { setError(errorText(failure)); }
+  };
+
+  const available = people.filter(person => !members.some(member => String(member.userId) === String(person.id)));
+  return <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal max-w-lg" onClick={event => event.stopPropagation()}>
+      <div className="flex items-start justify-between">
+        <div><p className="eyebrow">Access</p><h2 className="text-xl font-semibold">Share this document</h2></div>
+        <button onClick={onClose}><X /></button>
+      </div>
+      <p className="mt-2 text-sm text-slate-500">Colleagues you add here can open the document. Editors can also change it.</p>
+      {error && <div className="error-box">{error}</div>}
+      <div className="mt-4 flex flex-wrap items-end gap-2">
+        <label className="field-label mt-0 min-w-48 flex-1">Colleague
+          <select value={form.userId} onChange={event => setForm({ ...form, userId: event.target.value })}>
+            <option value="">Choose someone…</option>
+            {available.map(person => <option key={person.id} value={person.id}>{person.fullName} ({person.email})</option>)}
+          </select>
+        </label>
+        <label className="field-label mt-0">Access
+          <select value={form.permission} onChange={event => setForm({ ...form, permission: event.target.value })}>
+            <option value="view">Viewer</option>
+            <option value="edit">Editor</option>
+          </select>
+        </label>
+        <button className="primary-button" disabled={busy || !form.userId} onClick={share}>Share</button>
+      </div>
+      <div className="mt-5 divide-y divide-slate-100">
+        {members.map(member => <div key={member.id} className="flex items-center gap-3 py-3">
+          <span className="avatar">{(member.fullName || '?').slice(0, 1).toUpperCase()}</span>
+          <div className="min-w-0 flex-1"><b className="block truncate text-sm">{member.fullName}</b><small className="text-slate-500">{member.email}</small></div>
+          <span className="chip">{member.permission === 'edit' ? 'Editor' : 'Viewer'}</span>
+          <button className="icon-button text-red-600" title="Remove access" onClick={() => revoke(member.userId)}><Trash2 size={16} /></button>
+        </div>)}
+        {!members.length && <p className="py-3 text-sm text-slate-500">Only you and administrators can see this document.</p>}
+      </div>
+    </div>
+  </div>;
+}
+
+// The document's own timeline: who did what, including the signers.
+function HistoryPanel({ documentId, onClose }) {
+  const [events, setEvents] = useState([]);
+  const [busy, setBusy] = useState(true);
+  useEffect(() => {
+    api.get(`/sign/${documentId}/activity`).then(({ data }) => setEvents(data.events)).catch(() => {}).finally(() => setBusy(false));
+  }, [documentId]);
+  return <aside className="properties">
+    <div className="flex items-center justify-between">
+      <h3 className="font-semibold">Document history</h3>
+      <button onClick={onClose}><X size={18} /></button>
+    </div>
+    {busy ? <Loader2 className="mx-auto mt-8 animate-spin text-brand-600" /> : <ol className="timeline mt-5">
+      {events.map(event => <li key={event._id}>
+        <span className="timeline-dot" style={{ background: event.actorType === 'signer' ? '#b45309' : '#1d4ed8' }} />
+        <div>
+          <b>{event.description}</b>
+          <p>{formatDateTime(event.createdAt)}{event.ipAddress ? ` · ${event.ipAddress}` : ''}</p>
+        </div>
+      </li>)}
+      {!events.length && <p className="text-sm text-slate-500">Nothing recorded yet.</p>}
+    </ol>}
+  </aside>;
+}
+
 function Designer() {
-  const {id}=useParams(), navigate=useNavigate(); const [doc,setDoc]=useState(null),[signers,setSigners]=useState([]),[fields,setFields]=useState([]),[selected,setSelected]=useState(null),[busy,setBusy]=useState(true),[error,setError]=useState(''),[sendOpen,setSendOpen]=useState(false),[dirty,setDirty]=useState(false),[zoom,setZoom]=useState(1),[currentPage,setCurrentPage]=useState(1),[activeSigner,setActiveSigner]=useState(''),[signerModal,setSignerModal]=useState(null);
-  useEffect(()=>{api.get(`/sign/${id}`).then(({data})=>{setDoc(data);setSigners(data.signers||[]);setFields(data.fields||[]);setActiveSigner(data.signers?.[0]?._id||'')}).catch(e=>setError(errorText(e))).finally(()=>setBusy(false))},[id]);
+  const {id}=useParams(), navigate=useNavigate(); const [doc,setDoc]=useState(null),[signers,setSigners]=useState([]),[fields,setFields]=useState([]),[selected,setSelected]=useState(null),[busy,setBusy]=useState(true),[error,setError]=useState(''),[sendOpen,setSendOpen]=useState(false),[dirty,setDirty]=useState(false),[zoom,setZoom]=useState(1),[currentPage,setCurrentPage]=useState(1),[activeSigner,setActiveSigner]=useState(''),[signerModal,setSignerModal]=useState(null),[pageMetrics,setPageMetrics]=useState([]),[access,setAccess]=useState({}),[sharing,setSharing]=useState(false),[history,setHistory]=useState(false);
+  useEffect(()=>{api.get(`/sign/${id}`).then(({data})=>{setDoc(data);setAccess(data.access||{});setSigners(data.signers||[]);setFields(data.fields||[]);setActiveSigner(data.signers?.[0]?._id||'')}).catch(e=>setError(errorText(e))).finally(()=>setBusy(false))},[id]);
   useEffect(()=>{const warn=e=>{if(dirty){e.preventDefault();e.returnValue=''}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn)},[dirty]);
   useEffect(()=>{const remove=e=>{if((e.key==='Delete'||e.key==='Backspace')&&selected&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){setFields(current=>current.filter(f=>f._id!==selected));setSelected(null);setDirty(true)}};window.addEventListener('keydown',remove);return()=>window.removeEventListener('keydown',remove)},[selected]);
   const addSigner=()=>setSignerModal({name:'',email:''});
   const saveSigner=form=>{if(form._id){setSigners(signers.map(s=>s._id===form._id?{...s,name:form.name,email:form.email}:s));setActiveSigner(form._id)}else{const signer={_id:newObjectId(),name:form.name,email:form.email,type:'Candidate',order:signers.length+1,status:'pending'};setSigners([...signers,signer]);setActiveSigner(signer._id)}setSignerModal(null);setDirty(true)};
-  const addField=(type,page,x=.65,y=.75)=>{if(!signers.length)return setError('Add a signer before placing fields.');const signerId=activeSigner||signers[0]._id,signerIndex=Math.max(0,signers.findIndex(s=>String(s._id)===String(signerId)));const f={_id:newObjectId(),signerId,pageNumber:page,type,x:Math.min(x,.78),y:Math.min(y,.92),width:type==='signature'?.2:.16,height:type==='signature'?.07:.045,required:true,label:type[0].toUpperCase()+type.slice(1),signerIndex};setFields([...fields,f]);setSelected(f._id);setDirty(true)};
+  const addField=(type,page,x=.65,y=.75)=>{if(!signers.length)return setError('Add a signer before placing fields.');const signerId=activeSigner||signers[0]._id,signerIndex=Math.max(0,signers.findIndex(s=>String(s._id)===String(signerId)));const label=type[0].toUpperCase()+type.slice(1),metrics=pageMetrics.find(m=>m.number===page)||pageMetrics[0]||FALLBACK_PAGE,size=sizeToFractions(getContentFieldSize(type,label),metrics);const f={_id:newObjectId(),signerId,pageNumber:page,type,...clampFieldToPage({x:x-size.width/2,y:y-size.height/2,...size}),required:true,label,signerIndex};setFields([...fields,f]);setSelected(f._id);setDirty(true)};
   const updateField=(fieldId,changes)=>{setFields(current=>changes.__delete?current.filter(f=>f._id!==fieldId):current.map(f=>f._id===fieldId?{...f,...changes}:f));if(changes.__delete)setSelected(null);setDirty(true)};
   const save=async()=>{setBusy(true);setError('');try{const clean=fields.map(({signerIndex,...f})=>f);const {data}=await api.put(`/sign/${id}/design`,{signers,fields:clean});setDoc(data);setSigners(data.signers);setFields(data.fields.map(f=>({...f,signerIndex:Math.max(0,data.signers.findIndex(s=>String(s._id)===String(f.signerId)))})));setDirty(false)}catch(e){setError(errorText(e))}finally{setBusy(false)}};
-  useEffect(()=>{if(!dirty)return;const timer=setTimeout(async()=>{try{const clean=fields.map(({signerIndex,...f})=>f);await api.put(`/sign/${id}/design`,{signers,fields:clean});setDirty(false)}catch(e){setError(errorText(e))}},1400);return()=>clearTimeout(timer)},[dirty,fields,signers,id]);
+  useEffect(()=>{if(!dirty||!access.canEdit)return;const timer=setTimeout(async()=>{try{const clean=fields.map(({signerIndex,...f})=>f);await api.put(`/sign/${id}/design`,{signers,fields:clean});setDirty(false)}catch(e){setError(errorText(e))}},1400);return()=>clearTimeout(timer)},[dirty,fields,signers,id,access.canEdit]);
   const goPage=page=>{const next=Math.max(1,Math.min(doc?.pageCount||1,page));setCurrentPage(next);document.querySelectorAll('.designer-main .pdf-page')[next-1]?.scrollIntoView({behavior:'smooth',block:'start'})};
   if(busy&&!doc)return <div className="loading"><Loader2 className="animate-spin"/></div>;
   if(doc?.status==='Signed')return <SignedDocumentView doc={doc}/>;
-  return <Shell><div className="designer"><aside className="designer-sidebar"><div className="sidebar-section"><div className="section-heading"><h2>Documents</h2><button onClick={()=>navigate('/')}>Back</button></div><div className="document-chip"><FileText size={17}/><span>{doc?.title}</span><MoreVertical className="ml-auto" size={17}/></div></div><div className="sidebar-section p-0"><div className="section-heading px-3 pt-4"><h2>Signers</h2><button onClick={addSigner}>Add</button></div><div>{signers.map((s,i)=><div role="button" tabIndex="0" onClick={()=>setActiveSigner(s._id)} className={`signer-row ${String(activeSigner)===String(s._id)?'active':''}`} key={s._id}><span className="signer-dot" style={{background:fieldColors[i%fieldColors.length]}}/><div><b>{s.name}</b><small>{s.email}</small></div><button className="signer-edit" title="Edit signer" onClick={e=>{e.stopPropagation();setSignerModal({...s})}}><PenLine size={15}/></button><b className="signer-count" style={{background:`${fieldColors[i%fieldColors.length]}20`,color:fieldColors[i%fieldColors.length]}}>{fields.filter(f=>String(f.signerId)===String(s._id)).length}</b><MoreVertical size={17}/></div>)}</div></div><div className="sidebar-section"><div className="section-heading"><h2>Fields</h2><span>Drag or click</span></div><div className="field-grid signer-palette" style={{'--signer-color':fieldColors[Math.max(0,signers.findIndex(s=>String(s._id)===String(activeSigner)))%fieldColors.length]}}>{fieldTypes.map(type=>{const Icon=fieldIcons[type]||Type;return <button draggable onClick={()=>addField(type,currentPage,.62,.72)} onDragStart={e=>e.dataTransfer.setData('fieldType',type)} key={type}><Icon size={16}/><span>{type}</span></button>})}<button className="col-span-2" onClick={()=>addField('text',currentPage,.62,.72)}><Plus size={17}/>Add Field</button></div></div></aside>
-  <main className="designer-main"><div className="designer-toolbar"><div><p className="text-xs text-slate-500">{doc?.referenceNumber}</p><h1 className="font-semibold">{doc?.title} {dirty?<span className="ml-2 text-xs font-normal text-amber-600">Saving…</span>:<span className="ml-2 text-xs font-normal text-emerald-600">Saved</span>}</h1></div><div className="flex gap-2"><button disabled={busy||!dirty} onClick={save} className="secondary-button">{busy&&<Loader2 size={15} className="animate-spin"/>}Save</button><button onClick={()=>setSendOpen(true)} className="primary-button"><Send size={16}/>Send</button></div></div><div className="pdf-toolbar"><button onClick={()=>goPage(currentPage-1)}><ChevronLeft size={17}/></button><input value={currentPage} onChange={e=>goPage(Number(e.target.value)||1)}/><span>of {doc?.pageCount||1}</span><i/><button onClick={()=>setZoom(Math.max(.6,zoom-.1))}><Minus size={17}/></button><select value={zoom} onChange={e=>setZoom(Number(e.target.value))}><option value="0.75">75%</option><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option></select><button onClick={()=>setZoom(Math.min(1.8,zoom+.1))}><Plus size={17}/></button><button onClick={()=>goPage(currentPage+1)}><ChevronRight size={17}/></button></div>{error&&<div className="error-box mx-auto max-w-2xl">{error}</div>}<div className="pdf-stage p-6" style={{width:`${Math.max(760,850*zoom)}px`}}><PdfPages url={`/api/sign/${id}/pdf`} fields={fields} selected={selected} zoom={zoom} onDrop={addField} onFieldChange={updateField} onFieldClick={f=>{setSelected(f._id);setCurrentPage(f.pageNumber)}}/></div></main>
-  {signerModal&&<SignerModal signer={signerModal} onClose={()=>setSignerModal(null)} onSave={saveSigner}/>} {selected&&<aside className="properties"><div className="flex justify-between"><h3 className="font-semibold">Field properties</h3><button onClick={()=>setSelected(null)}><X size={18}/></button></div>{(()=>{const f=fields.find(x=>x._id===selected);if(!f)return null;const update=p=>updateField(selected,p);return <div className="mt-5 space-y-4"><label className="field-label">Label<input value={f.label} onChange={e=>update({label:e.target.value})}/></label><label className="field-label">Placeholder<input value={f.placeholder||''} onChange={e=>update({placeholder:e.target.value})}/></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.required} onChange={e=>update({required:e.target.checked})}/>Required</label><label className="field-label">Signer<select value={f.signerId} onChange={e=>update({signerId:e.target.value,signerIndex:Math.max(0,signers.findIndex(s=>s._id===e.target.value))})}>{signers.map(s=><option key={s._id} value={s._id}>{s.name}</option>)}</select></label><button className="secondary-button w-full" onClick={()=>{const copy={...f,_id:newObjectId(),x:Math.min(.9,f.x+.02),y:Math.min(.9,f.y+.02)};setFields([...fields,copy]);setSelected(copy._id);setDirty(true)}}>Duplicate field</button><button className="danger-button w-full" onClick={()=>{setFields(fields.filter(x=>x._id!==selected));setSelected(null);setDirty(true)}}><Trash2 size={15}/>Delete field</button></div>})()}</aside>}{sendOpen&&<SendModal doc={{...doc,signers}} onClose={()=>setSendOpen(false)} onSend={async form=>{await save();await api.post(`/sign/${id}/send`,form);setSendOpen(false);navigate('/')}}/>}</div></Shell>;
+  return <Shell><div className="designer"><aside className="designer-sidebar"><div className="sidebar-section"><div className="section-heading"><h2>Documents</h2><button onClick={()=>navigate('/')}>Back</button></div><div className="document-chip"><FileText size={17}/><span>{doc?.title}</span><MoreVertical className="ml-auto" size={17}/></div></div><div className="sidebar-section p-0"><div className="section-heading px-3 pt-4"><h2>Signers</h2>{access.canEdit&&<button onClick={addSigner}>Add</button>}</div><div>{signers.map((s,i)=><div role="button" tabIndex="0" onClick={()=>setActiveSigner(s._id)} className={`signer-row ${String(activeSigner)===String(s._id)?'active':''}`} key={s._id}><span className="signer-dot" style={{background:fieldColors[i%fieldColors.length]}}/><div><b>{s.name}</b><small>{s.email}</small></div><button className="signer-edit" title="Edit signer" onClick={e=>{e.stopPropagation();setSignerModal({...s})}}><PenLine size={15}/></button><b className="signer-count" style={{background:`${fieldColors[i%fieldColors.length]}20`,color:fieldColors[i%fieldColors.length]}}>{fields.filter(f=>String(f.signerId)===String(s._id)).length}</b><MoreVertical size={17}/></div>)}</div></div>{!access.canEdit&&<div className="sidebar-section"><div className="rounded-xl bg-slate-100 p-3 text-xs text-slate-600">You have read-only access to this document.</div></div>}{access.canEdit&&<div className="sidebar-section"><div className="section-heading"><h2>Fields</h2><span>Drag or click</span></div><div className="field-grid signer-palette" style={{'--signer-color':fieldColors[Math.max(0,signers.findIndex(s=>String(s._id)===String(activeSigner)))%fieldColors.length]}}>{fieldTypes.map(type=>{const Icon=fieldIcons[type]||Type;return <button draggable onClick={()=>addField(type,currentPage,.62,.72)} onDragStart={e=>e.dataTransfer.setData('fieldType',type)} key={type}><Icon size={16}/><span>{type}</span></button>})}<button className="col-span-2" onClick={()=>addField('text',currentPage,.62,.72)}><Plus size={17}/>Add Field</button></div></div>}</aside>
+  <main className="designer-main"><div className="designer-toolbar"><div><p className="text-xs text-slate-500">{doc?.referenceNumber}</p><h1 className="font-semibold">{doc?.title} {access.canEdit&&(dirty?<span className="ml-2 text-xs font-normal text-amber-600">Saving…</span>:<span className="ml-2 text-xs font-normal text-emerald-600">Saved</span>)}</h1></div><div className="flex gap-2"><button className="secondary-button" onClick={()=>setHistory(!history)}><Activity size={16}/>History</button>{access.canShare&&<button className="secondary-button" onClick={()=>setSharing(true)}><Share2 size={16}/>Share</button>}{access.canEdit&&<button disabled={busy||!dirty} onClick={save} className="secondary-button">{busy&&<Loader2 size={15} className="animate-spin"/>}Save</button>}{access.canSend&&<button onClick={()=>setSendOpen(true)} className="primary-button"><Send size={16}/>Send</button>}</div></div><div className="pdf-toolbar"><button onClick={()=>goPage(currentPage-1)}><ChevronLeft size={17}/></button><input value={currentPage} onChange={e=>goPage(Number(e.target.value)||1)}/><span>of {doc?.pageCount||1}</span><i/><button onClick={()=>setZoom(Math.max(.6,zoom-.1))}><Minus size={17}/></button><select value={zoom} onChange={e=>setZoom(Number(e.target.value))}><option value="0.75">75%</option><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option></select><button onClick={()=>setZoom(Math.min(1.8,zoom+.1))}><Plus size={17}/></button><button onClick={()=>goPage(currentPage+1)}><ChevronRight size={17}/></button></div>{error&&<div className="error-box mx-auto max-w-2xl">{error}</div>}<div className="pdf-stage p-6" style={{width:`${Math.max(760,850*zoom)}px`}}><PdfPages url={`/api/sign/${id}/pdf`} fields={fields} selected={selected} zoom={zoom} onPages={setPageMetrics} onDrop={access.canEdit?addField:undefined} onFieldChange={access.canEdit?updateField:undefined} onFieldClick={f=>{setSelected(f._id);setCurrentPage(f.pageNumber)}}/></div></main>
+  {signerModal&&<SignerModal signer={signerModal} onClose={()=>setSignerModal(null)} onSave={saveSigner}/>} {sharing&&<ShareModal documentId={id} onClose={()=>setSharing(false)}/>}{history&&<HistoryPanel documentId={id} onClose={()=>setHistory(false)}/>}{selected&&!history&&<aside className="properties"><div className="flex justify-between"><h3 className="font-semibold">Field properties</h3><button onClick={()=>setSelected(null)}><X size={18}/></button></div>{(()=>{const f=fields.find(x=>x._id===selected);if(!f)return null;const update=p=>updateField(selected,p);return <div className="mt-5 space-y-4"><label className="field-label">Label<input value={f.label} onChange={e=>update({label:e.target.value})}/></label><label className="field-label">Placeholder<input value={f.placeholder||''} onChange={e=>update({placeholder:e.target.value})}/></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.required} onChange={e=>update({required:e.target.checked})}/>Required</label><label className="field-label">Signer<select value={f.signerId} onChange={e=>update({signerId:e.target.value,signerIndex:Math.max(0,signers.findIndex(s=>s._id===e.target.value))})}>{signers.map(s=><option key={s._id} value={s._id}>{s.name}</option>)}</select></label><button className="secondary-button w-full" onClick={()=>{const copy={...f,_id:newObjectId(),x:Math.min(.9,f.x+.02),y:Math.min(.9,f.y+.02)};setFields([...fields,copy]);setSelected(copy._id);setDirty(true)}}>Duplicate field</button><button className="danger-button w-full" onClick={()=>{setFields(fields.filter(x=>x._id!==selected));setSelected(null);setDirty(true)}}><Trash2 size={15}/>Delete field</button></div>})()}</aside>}{sendOpen&&<SendModal doc={{...doc,signers}} onClose={()=>setSendOpen(false)} onSend={async form=>{await save();await api.post(`/sign/${id}/send`,form);setSendOpen(false);navigate('/')}}/>}</div></Shell>;
 }
 function SendModal({doc,onClose,onSend}) {
   const d=new Date(Date.now()+7*86400000).toISOString().slice(0,10);
@@ -82,7 +325,33 @@ function SignedDocumentView({doc}){
   return <Shell><div className="signed-view"><div className="signed-view-toolbar"><div className="flex items-center gap-3"><button className="icon-button" onClick={()=>navigate('/')}><ArrowLeft size={19}/></button><span className="grid h-10 w-10 place-items-center rounded-xl bg-emerald-50 text-emerald-700"><Check size={21}/></span><div><div className="flex items-center gap-2"><h1>{doc.title}</h1><span className="status status-signed">Signed</span></div><p>{doc.referenceNumber} · Completed {doc.completedAt?new Date(doc.completedAt).toLocaleString():''}</p></div></div><div className="flex gap-2"><button className="secondary-button" onClick={()=>download(true)}><ShieldCheck size={17}/>Certificate</button><button className="primary-button" onClick={()=>download(false)}><Download size={17}/>Signed PDF</button></div></div>{error&&<div className="error-box mx-auto max-w-3xl">{error}</div>}<div className="signed-readonly-note"><ShieldCheck size={17}/><span>This document is completed and read-only. It cannot be signed again.</span></div><main className="signed-pdf"><PdfPages url={`/api/sign/${doc._id}/pdf?signed=true`}/></main></div></Shell>
 }
 
-export default function App(){return <Routes><Route path="/login" element={<Login/>}/><Route path="/documents/:id/design" element={<Designer/>}/><Route path="/sign/request/:token" element={<PublicSignV2/>}/><Route path="*" element={<Dashboard/>}/></Routes>}
+// Route protection is only the first gate; every API call is checked again
+// on the server, so hiding a page never stands alone as a control.
+export default function App() {
+  return <AuthProvider>
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/accept-invite" element={<AcceptInvitePage />} />
+      <Route path="/verify-email" element={<AcceptInvitePage />} />
+      <Route path="/sign/request/:token" element={<PublicSignV2 />} />
+
+      <Route path="/documents/:id/design" element={<Protected permission="documents.view"><Designer /></Protected>} />
+      <Route path="/profile" element={<Protected><Shell><ProfilePage /></Shell></Protected>} />
+      <Route path="/profile/security" element={<Protected><Shell><SecurityPage /></Shell></Protected>} />
+      <Route path="/profile/activity" element={<Protected><Shell><MyActivityPage /></Shell></Protected>} />
+
+      <Route path="/admin" element={<Protected anyOf={['users.view', 'activity.view', 'audit.view', 'roles.view']}><Shell><AdminDashboard /></Shell></Protected>} />
+      <Route path="/admin/users" element={<Protected permission="users.view"><Shell><UsersPage /></Shell></Protected>} />
+      <Route path="/admin/users/:id" element={<Protected permission="users.view"><Shell><UserDetailPage /></Shell></Protected>} />
+      <Route path="/admin/roles" element={<Protected permission="roles.view"><Shell><RolesPage /></Shell></Protected>} />
+      <Route path="/admin/activity" element={<Protected permission="activity.view"><Shell><ActivityPage /></Shell></Protected>} />
+      <Route path="/admin/audit" element={<Protected permission="audit.view"><Shell><AuditPage /></Shell></Protected>} />
+
+      <Route path="*" element={<Protected permission="documents.view"><Dashboard /></Protected>} />
+    </Routes>
+  </AuthProvider>;
+}
 
 function PublicSignV2(){
   const {token}=useParams();

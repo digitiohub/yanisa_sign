@@ -3,3 +3,5 @@ client/node_modules/
 client/dist/
 .env
 *.log
+# Uploaded and generated PDFs, plus the development mail outbox (contains codes)
+storage/

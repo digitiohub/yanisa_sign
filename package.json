@@ -8,11 +8,13 @@
     "client": "cd client && npm run dev",
     "build": "cd client && npm run build",
     "start": "node server/index.js",
-    "test": "node --test server/tests/*.test.js",
+    "test": "node --test server/tests/",
     "lint": "node --check server/index.js && node --check server/routes/sign.js"
   },
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "compression": "^1.6.0",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.1",
     "dotenv": "^16.4.1",
     "express": "^4.21.2",
@@ -24,7 +26,9 @@
     "multer": "^2.0.2",
     "nodemailer": "^9.0.3",
     "pdf-lib": "^1.10.0",
-    "pdfjs-dist": "^4.6.0"
+    "pdfjs-dist": "^4.6.0",
+    "ua-parser-js": "^2.0.10",
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "concurrently": "^9.0.1",

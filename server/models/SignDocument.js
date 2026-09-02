@@ -38,6 +38,13 @@ const schema = new mongoose.Schema({
   originalHash: { type: String, required: true }, signedHash: String, certificateHash: String,
   pageCount: { type: Number, required: true },
   status: { type: String, enum: ['Draft', 'Ready to Send', 'Sent', 'Delivered', 'Viewed', 'Pending Signature', 'Partially Signed', 'Signed', 'Declined', 'Expired', 'Cancelled', 'Failed'], default: 'Draft', index: true },
+  // Ownership and tenancy. createdBy stays the email address so existing
+  // documents and the completion certificate keep rendering unchanged.
+  companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', index: true },
+  workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
+  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   createdBy: { type: String, required: true },
   relatedEntityType: String, relatedEntityId: String,
   signers: [signerSchema], fields: [fieldSchema], audits: [auditSchema],

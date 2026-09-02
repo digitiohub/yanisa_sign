@@ -7,10 +7,13 @@ const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const path = require('path');
 const rateLimit = require('express-rate-limit');
-const jwt = require('jsonwebtoken');
+const cookieParser = require('cookie-parser');
 const multer = require('multer');
 const signRoutes = require('./routes/sign');
+const authRoutes = require('./routes/auth');
+const adminRoutes = require('./routes/admin');
 const { initStorage } = require('./services/storage');
+const { bootstrap } = require('./services/bootstrap');
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
@@ -29,23 +32,21 @@ app.use(cors({
 }));
 app.use(compression());
 app.use(morgan('dev'));
+app.use(cookieParser());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
+// Broad safety net for the whole API. The tight limits that matter - login,
+// OTP send and verify - live on those routes in routes/auth.js.
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: Number(process.env.RATE_LIMIT_GLOBAL || 1000), standardHeaders: true, legacyHeaders: false, message: { error: 'Too many requests. Please slow down and try again shortly.' } });
 app.use(limiter);
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, message: 'Sign service ready', database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected' });
 });
 
-app.post('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }), (req, res) => {
-  const email = String(req.body.email || '').toLowerCase();
-  const password = String(req.body.password || '');
-  if (!process.env.ADMIN_EMAIL || !process.env.ADMIN_PASSWORD || email !== process.env.ADMIN_EMAIL.toLowerCase() || password !== process.env.ADMIN_PASSWORD) return res.status(401).json({ error: 'Invalid credentials' });
-  res.json({ token: jwt.sign({ sub: email, email, role: 'hr_admin' }, process.env.JWT_SECRET, { expiresIn: '8h' }), user: { email, role: 'hr_admin' } });
-});
-
+app.use('/api/auth', authRoutes);
+app.use('/api/admin', adminRoutes);
 app.use('/api/sign', signRoutes);
 
 if (isProduction) {
@@ -68,6 +69,7 @@ async function start() {
     if (process.env.MONGO_URI) {
       await mongoose.connect(process.env.MONGO_URI);
       console.log('MongoDB connected');
+      await bootstrap();
     }
     await initStorage();
 
