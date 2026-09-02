@@ -16,6 +16,24 @@ On first boot the server seeds the built-in roles, the default company and works
 
 Without `SMTP_HOST`, development writes every outgoing email to `storage/dev-outbox.log` (one JSON line per message) so invitations and verification codes can be followed end to end.
 
+## Demo accounts
+
+To try the roles without inviting real people:
+
+```bash
+npm run seed:demo
+```
+
+| Role | Email | Password |
+| --- | --- | --- |
+| Super Admin | your `ADMIN_EMAIL` | your `ADMIN_PASSWORD` |
+| Admin | `admin.demo@yanisa.test` | `Demo@12345` |
+| Manager | `manager.demo@yanisa.test` | `Demo@12345` |
+| Editor | `editor.demo@yanisa.test` | `Demo@12345` |
+| Viewer | `viewer.demo@yanisa.test` | `Demo@12345` |
+
+Re-running resets those four passwords rather than creating duplicates. Because the password is shared and well known, the script refuses to run when `NODE_ENV=production` unless `ALLOW_DEMO_SEED=true`; override the password with `DEMO_PASSWORD`. Delete these accounts from Administration > Users before a real launch.
+
 ## Users, roles and permissions
 
 Five roles ship as built-ins and more can be created under Administration → Roles:
