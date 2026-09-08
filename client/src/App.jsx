@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import * as pdfjs from 'pdfjs-dist';
-import { Activity, AlignLeft, ArrowLeft, Building2, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Download, FileSignature, FileText, Loader2, LogOut, Mail, Minus, MoreVertical, PenLine, Phone, Plus, Search, Send, Share2, ShieldCheck, Stamp, Strikethrough, Trash2, Type, Upload, User, X } from 'lucide-react';
-import { FALLBACK_PAGE, calculateDrag, calculateResize, clampFieldToPage, getContentFieldSize, sizeToFractions } from './fieldGeometry';
+import { Activity, AlignCenter, AlignLeft, AlignRight, ArrowLeft, Building2, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Copy, Download, FileSignature, FileText, Loader2, LogOut, Mail, Minus, MoreVertical, PenLine, Phone, Plus, Search, Send, Share2, ShieldCheck, Stamp, Strikethrough, Trash2, Type, Upload, User, X } from 'lucide-react';
+import { FALLBACK_PAGE, calculateDrag, calculateResize, clampFieldToPage, findFreeSpot, getDefaultFieldSize, sizeToFractions } from './fieldGeometry';
 import { api, errorText, formatDate, formatDateTime, getAccessToken, initials } from './api';
 import { AuthProvider, Protected, useAuth } from './auth-context';
 import { AcceptInvitePage, ForgotPasswordPage, LoginPage } from './auth-pages';
@@ -12,7 +12,7 @@ import { ActivityPage, AdminDashboard, AuditPage, RolesPage, UserDetailPage, Use
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
 const fieldTypes = ['signature', 'initials', 'name', 'email', 'phone', 'company', 'text', 'multiline', 'checkbox', 'radio', 'selection', 'date', 'strikethrough', 'stamp'];
-const fieldColors = ['#1d4ed8', '#0f766e', '#b45309', '#be185d'];
+const fieldColors = ['#5b53c9', '#0f766e', '#b45309', '#be185d'];
 const fieldIcons = {signature:PenLine,initials:PenLine,name:User,email:Mail,phone:Phone,company:Building2,text:Type,multiline:AlignLeft,checkbox:CheckSquare2,radio:CircleDot,selection:ChevronDown,date:CalendarDays,strikethrough:Strikethrough,stamp:Stamp};
 const newObjectId = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), b => b.toString(16).padStart(2, '0')).join('');
 
@@ -192,15 +192,35 @@ function Dashboard() {
   </main></Shell>;
 }
 
-function PdfPages({ url, fields=[], onDrop, onPages, onFieldClick, onFieldChange, onFieldDelete=(fieldId)=>onFieldChange?.(fieldId,{__delete:true}), selected, interactive=false, values={}, onValue, zoom=1 }) {
+function PdfPages({ url, fields=[], onDrop, onPages, onFieldClick, onFieldContext, onFieldChange, selected, interactive=false, values={}, onValue, zoom=1 }) {
   const [pages,setPages]=useState([]); useEffect(()=>{let live=true; pdfjs.getDocument({url,httpHeaders:getAccessToken()?{Authorization:`Bearer ${getAccessToken()}`}:{}}).promise.then(async pdf=>{const list=[];for(let i=1;i<=pdf.numPages;i++){const page=await pdf.getPage(i);const viewport=page.getViewport({scale:1.35*zoom});const canvas=document.createElement('canvas');canvas.width=viewport.width;canvas.height=viewport.height;await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;list.push({number:i,url:canvas.toDataURL(),ratio:viewport.height/viewport.width,baseWidth:viewport.width/zoom,baseHeight:viewport.height/zoom});}if(live){setPages(list);onPages?.(list)}});return()=>{live=false}},[url,zoom]);
-  const startPointer=(e,f,mode='move')=>{if(interactive||!onFieldChange)return;const pageEl=e.currentTarget.closest('.pdf-page');if(!pageEl)return;e.preventDefault();e.stopPropagation();onFieldClick?.(f);const handle=e.currentTarget,pointerId=e.pointerId,origin={...f},rect=pageEl.getBoundingClientRect(),rendered=pages.find(p=>p.number===f.pageNumber),page={width:rect.width,height:rect.height,baseWidth:rendered?.baseWidth||rect.width,baseHeight:rendered?.baseHeight||rect.height},sx=e.clientX,sy=e.clientY,restoreSelect=document.body.style.userSelect;document.body.style.userSelect='none';try{handle.setPointerCapture(pointerId)}catch{}
+  const startPointer=(e,f,mode='move')=>{if(interactive||!onFieldChange||e.button!==0)return;const pageEl=e.currentTarget.closest('.pdf-page');if(!pageEl)return;e.preventDefault();e.stopPropagation();onFieldClick?.(f);const handle=e.currentTarget,pointerId=e.pointerId,origin={...f},rect=pageEl.getBoundingClientRect(),rendered=pages.find(p=>p.number===f.pageNumber),page={width:rect.width,height:rect.height,baseWidth:rendered?.baseWidth||rect.width,baseHeight:rendered?.baseHeight||rect.height},sx=e.clientX,sy=e.clientY,restoreSelect=document.body.style.userSelect;document.body.style.userSelect='none';try{handle.setPointerCapture(pointerId)}catch{}
     const move=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy,snap=!ev.altKey;onFieldChange(f._id,mode==='resize'?calculateResize({origin,dx,dy,page,type:f.type,snap}):calculateDrag({origin,dx,dy,page,snap}))};
     const up=()=>{try{handle.releasePointerCapture(pointerId)}catch{}document.body.style.userSelect=restoreSelect;window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',up)};
     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);window.addEventListener('pointercancel',up)};
-  return <div className="space-y-6">{pages.map(p=><div key={p.number} className="pdf-page" style={{aspectRatio:`1/${p.ratio}`}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const type=e.dataTransfer.getData('fieldType');if(!type||!onDrop)return;const r=e.currentTarget.getBoundingClientRect();onDrop(type,p.number,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height)}}><img src={p.url}/>{fields.filter(f=>f.pageNumber===p.number).map((f,i)=>{const FieldIcon=fieldIcons[f.type]||Type;return <div key={f._id||i} data-field-type={f.type} onPointerDown={e=>startPointer(e,f)} onClick={()=>onFieldClick?.(f)} className={`placed-field ${interactive?'interactive':''} ${selected===f._id?'selected':''}`} style={{left:`${f.x*100}%`,top:`${f.y*100}%`,width:`${f.width*100}%`,height:`${f.height*100}%`,borderColor:fieldColors[f.signerIndex||0]}}>{interactive?<FieldInput field={f} value={values[f._id]} onChange={v=>onValue(f,v)}/>:<><FieldIcon className="field-icon" size={13}/><span className="field-text">{f.label||f.type}</span>{f.required&&<b className="field-required">*</b>}{selected===f._id&&<button className="field-delete" title="Delete field" onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();onFieldDelete?.(f._id)}}><Trash2 size={14}/></button>}<i title="Drag to resize" onPointerDown={e=>startPointer(e,f,'resize')}/></>}</div>})}</div>)}</div>;
+  const openContext=(e,f)=>{if(interactive||!onFieldContext)return;e.preventDefault();e.stopPropagation();onFieldClick?.(f);onFieldContext(f,e.currentTarget.getBoundingClientRect())};
+  return <div className="space-y-6">{pages.map(p=><div key={p.number} className="pdf-page" style={{aspectRatio:`1/${p.ratio}`}} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();const type=e.dataTransfer.getData('fieldType');if(!type||!onDrop)return;const r=e.currentTarget.getBoundingClientRect();onDrop(type,p.number,(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height)}}>
+    <img src={p.url}/>
+    {fields.filter(f=>f.pageNumber===p.number).map((f,i)=>{
+      const FieldIcon=fieldIcons[f.type]||Type, glyphOnly=f.type==='checkbox'||f.type==='radio';
+      return <div key={f._id||i} data-field-type={f.type} onPointerDown={e=>startPointer(e,f)} onClick={()=>onFieldClick?.(f)} onContextMenu={e=>openContext(e,f)}
+        className={`placed-field ${interactive?'interactive':''} ${selected===f._id?'selected':''} ${f.readOnly?'read-only':''}`}
+        style={{left:`${f.x*100}%`,top:`${f.y*100}%`,width:`${f.width*100}%`,height:`${f.height*100}%`,'--field-color':fieldColors[f.signerIndex||0],textAlign:f.alignment||'left'}}>
+        {interactive
+          ? <FieldInput field={f} value={values[f._id]} onChange={v=>onValue(f,v)}/>
+          : <>{glyphOnly ? <FieldIcon className="field-icon" size={14}/> : <span className="field-text">{f.placeholder||f.label||f.type}</span>}<i title="Drag to resize" onPointerDown={e=>startPointer(e,f,'resize')}/></>}
+      </div>;
+    })}
+  </div>)}</div>;
 }
-function FieldInput({field,value,onChange}) { const [open,setOpen]=useState(false); if(['signature','initials','stamp'].includes(field.type)) return <><button className="h-full w-full bg-brand-50 text-xs font-semibold text-brand-700" onClick={()=>setOpen(true)}>{value?<img className="h-full w-full object-contain" src={value}/>:`Click to add ${field.type} *`}</button>{open&&<SignatureModal title={field.type} onClose={()=>setOpen(false)} onApply={v=>{onChange(v);setOpen(false)}}/>}</>; if(field.type==='checkbox'||field.type==='radio') return <input type="checkbox" checked={!!value} onChange={e=>onChange(e.target.checked)}/>; return <input className="h-full w-full border-0 bg-amber-50/80 p-1 text-xs" type={field.type==='date'?'date':'text'} value={value||''} placeholder={field.placeholder||field.label} onChange={e=>onChange(e.target.value)}/>; }
+function FieldInput({field,value,onChange}) {
+  const [open,setOpen]=useState(false);
+  const align=field.alignment||'left';
+  if(['signature','initials','stamp'].includes(field.type)) return <><button disabled={field.readOnly} className="h-full w-full bg-brand-50 text-xs font-semibold text-brand-700" onClick={()=>setOpen(true)}>{value?<img className="h-full w-full object-contain" src={value}/>:`Click to add ${field.type}${field.required?' *':''}`}</button>{open&&<SignatureModal title={field.type} onClose={()=>setOpen(false)} onApply={v=>{onChange(v);setOpen(false)}}/>}</>;
+  if(field.type==='checkbox'||field.type==='radio') return <input type="checkbox" disabled={field.readOnly} checked={!!value} onChange={e=>onChange(e.target.checked)}/>;
+  // A read-only field still shows the value the sender prefilled, it just cannot be retyped.
+  return <input className="h-full w-full border-0 bg-amber-50/80 p-1 text-xs read-only:bg-slate-100 read-only:text-slate-500" style={{textAlign:align}} readOnly={field.readOnly} type={field.type==='date'?'date':'text'} value={value||''} placeholder={field.placeholder||field.label} onChange={e=>onChange(e.target.value)}/>;
+}
 
 function SignatureModal({title,onClose,onApply}) { const canvas=useRef(),[tab,setTab]=useState('draw'),[typed,setTyped]=useState(''),[upload,setUpload]=useState(''); useEffect(()=>{if(tab!=='draw'||!canvas.current)return;const c=canvas.current,ctx=c.getContext('2d');ctx.lineWidth=3;ctx.lineCap='round';ctx.strokeStyle='#0f172a';let drawing=false;const point=e=>{const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height]};const down=e=>{drawing=true;ctx.beginPath();ctx.moveTo(...point(e));c.setPointerCapture(e.pointerId)};const move=e=>{if(drawing){ctx.lineTo(...point(e));ctx.stroke()}};const up=()=>drawing=false;c.addEventListener('pointerdown',down);c.addEventListener('pointermove',move);c.addEventListener('pointerup',up);return()=>{c.removeEventListener('pointerdown',down);c.removeEventListener('pointermove',move);c.removeEventListener('pointerup',up)}},[tab]);const typedImage=()=>{const c=document.createElement('canvas');c.width=700;c.height=180;const x=c.getContext('2d');x.font='italic 64px cursive';x.fillStyle='#0f172a';x.textAlign='center';x.textBaseline='middle';x.fillText(typed,350,90);return c.toDataURL('image/png')};const apply=()=>{const value=tab==='draw'?canvas.current?.toDataURL('image/png'):tab==='type'&&typed?typedImage():upload;if(value)onApply(value)};return <div className="modal-backdrop"><div className="modal max-w-xl"><div className="flex justify-between"><div><p className="eyebrow">Add your {title}</p><h2 className="text-xl font-semibold capitalize">Create {title}</h2></div><button onClick={onClose}><X/></button></div><div className="mt-5 flex gap-1 rounded-xl bg-slate-100 p-1">{['draw','type','upload'].map(t=><button key={t} onClick={()=>setTab(t)} className={`flex-1 rounded-lg px-3 py-2 text-sm capitalize ${tab===t?'bg-white font-semibold shadow-sm':''}`}>{t}</button>)}</div><div className="mt-4 h-52 rounded-xl border bg-slate-50">{tab==='draw'&&<canvas ref={canvas} width="700" height="250" className="h-full w-full touch-none"/>}{tab==='type'&&<div className="grid h-full place-items-center p-5"><input className="w-full text-center font-serif text-3xl italic" placeholder="Type your full name" value={typed} onChange={e=>setTyped(e.target.value)}/></div>}{tab==='upload'&&<div className="grid h-full place-items-center p-5"><label className="secondary-button cursor-pointer"><Upload size={17}/>Choose PNG or JPG<input hidden type="file" accept="image/png,image/jpeg" onChange={e=>{const f=e.target.files?.[0];if(!f||f.size>2*1024*1024)return;const r=new FileReader();r.onload=()=>setUpload(r.result);r.readAsDataURL(f)}}/></label>{upload&&<img className="max-h-24 max-w-full" src={upload}/>}</div>}</div><div className="mt-5 flex justify-between"><button className="secondary-button" onClick={()=>{if(canvas.current)canvas.current.getContext('2d').clearRect(0,0,canvas.current.width,canvas.current.height);setTyped('');setUpload('')}}>Clear</button><div className="flex gap-2"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button capitalize" onClick={apply}>Apply {title}</button></div></div></div></div>}
 
@@ -292,13 +312,29 @@ function HistoryPanel({ documentId, onClose }) {
 }
 
 function Designer() {
-  const {id}=useParams(), navigate=useNavigate(); const [doc,setDoc]=useState(null),[signers,setSigners]=useState([]),[fields,setFields]=useState([]),[selected,setSelected]=useState(null),[busy,setBusy]=useState(true),[error,setError]=useState(''),[sendOpen,setSendOpen]=useState(false),[dirty,setDirty]=useState(false),[zoom,setZoom]=useState(1),[currentPage,setCurrentPage]=useState(1),[activeSigner,setActiveSigner]=useState(''),[signerModal,setSignerModal]=useState(null),[pageMetrics,setPageMetrics]=useState([]),[access,setAccess]=useState({}),[sharing,setSharing]=useState(false),[history,setHistory]=useState(false);
+  const {id}=useParams(), navigate=useNavigate(); const [doc,setDoc]=useState(null),[signers,setSigners]=useState([]),[fields,setFields]=useState([]),[selected,setSelected]=useState(null),[busy,setBusy]=useState(true),[error,setError]=useState(''),[sendOpen,setSendOpen]=useState(false),[dirty,setDirty]=useState(false),[zoom,setZoom]=useState(1),[currentPage,setCurrentPage]=useState(1),[activeSigner,setActiveSigner]=useState(''),[signerModal,setSignerModal]=useState(null),[pageMetrics,setPageMetrics]=useState([]),[access,setAccess]=useState({}),[sharing,setSharing]=useState(false),[history,setHistory]=useState(false),[properties,setProperties]=useState(null);
   useEffect(()=>{api.get(`/sign/${id}`).then(({data})=>{setDoc(data);setAccess(data.access||{});setSigners(data.signers||[]);setFields(data.fields||[]);setActiveSigner(data.signers?.[0]?._id||'')}).catch(e=>setError(errorText(e))).finally(()=>setBusy(false))},[id]);
   useEffect(()=>{const warn=e=>{if(dirty){e.preventDefault();e.returnValue=''}};window.addEventListener('beforeunload',warn);return()=>window.removeEventListener('beforeunload',warn)},[dirty]);
-  useEffect(()=>{const remove=e=>{if((e.key==='Delete'||e.key==='Backspace')&&selected&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){setFields(current=>current.filter(f=>f._id!==selected));setSelected(null);setDirty(true)}};window.addEventListener('keydown',remove);return()=>window.removeEventListener('keydown',remove)},[selected]);
+  useEffect(()=>{const remove=e=>{if((e.key==='Delete'||e.key==='Backspace')&&selected&&!['INPUT','TEXTAREA','SELECT'].includes(document.activeElement?.tagName)){setFields(current=>current.filter(f=>f._id!==selected));setSelected(null);setProperties(null);setDirty(true)}};window.addEventListener('keydown',remove);return()=>window.removeEventListener('keydown',remove)},[selected]);
   const addSigner=()=>setSignerModal({name:'',email:''});
   const saveSigner=form=>{if(form._id){setSigners(signers.map(s=>s._id===form._id?{...s,name:form.name,email:form.email}:s));setActiveSigner(form._id)}else{const signer={_id:newObjectId(),name:form.name,email:form.email,type:'Candidate',order:signers.length+1,status:'pending'};setSigners([...signers,signer]);setActiveSigner(signer._id)}setSignerModal(null);setDirty(true)};
-  const addField=(type,page,x=.65,y=.75)=>{if(!signers.length)return setError('Add a signer before placing fields.');const signerId=activeSigner||signers[0]._id,signerIndex=Math.max(0,signers.findIndex(s=>String(s._id)===String(signerId)));const label=type[0].toUpperCase()+type.slice(1),metrics=pageMetrics.find(m=>m.number===page)||pageMetrics[0]||FALLBACK_PAGE,size=sizeToFractions(getContentFieldSize(type,label),metrics);const f={_id:newObjectId(),signerId,pageNumber:page,type,...clampFieldToPage({x:x-size.width/2,y:y-size.height/2,...size}),required:true,label,signerIndex};setFields([...fields,f]);setSelected(f._id);setDirty(true)};
+  const addField=(type,page,x=.65,y=.75)=>{
+    if(!signers.length)return setError('Add a signer before placing fields.');
+    const signerId=activeSigner||signers[0]._id,signerIndex=Math.max(0,signers.findIndex(s=>String(s._id)===String(signerId)));
+    const label=type[0].toUpperCase()+type.slice(1),metrics=pageMetrics.find(m=>m.number===page)||pageMetrics[0]||FALLBACK_PAGE;
+    const size=sizeToFractions(getDefaultFieldSize(type),metrics);
+    const spot=findFreeSpot({x:x-size.width/2,y:y-size.height/2,...size},fields.filter(f=>f.pageNumber===page),metrics);
+    const f={_id:newObjectId(),signerId,pageNumber:page,type,...spot,required:true,readOnly:false,alignment:'left',label,placeholder:label,signerIndex};
+    setFields([...fields,f]);setSelected(f._id);setDirty(true);
+  };
+  const duplicateField=fieldId=>{
+    const original=fields.find(f=>f._id===fieldId);if(!original)return;
+    const metrics=pageMetrics.find(m=>m.number===original.pageNumber)||pageMetrics[0]||FALLBACK_PAGE;
+    const box={x:original.x,y:original.y,width:original.width,height:original.height};
+    const copy={...original,_id:newObjectId(),...findFreeSpot(box,fields.filter(f=>f.pageNumber===original.pageNumber),metrics)};
+    setFields([...fields,copy]);setSelected(copy._id);setDirty(true);return copy;
+  };
+  const deleteField=fieldId=>{setFields(fields.filter(f=>f._id!==fieldId));setSelected(null);setProperties(null);setDirty(true)};
   const updateField=(fieldId,changes)=>{setFields(current=>changes.__delete?current.filter(f=>f._id!==fieldId):current.map(f=>f._id===fieldId?{...f,...changes}:f));if(changes.__delete)setSelected(null);setDirty(true)};
   const save=async()=>{setBusy(true);setError('');try{const clean=fields.map(({signerIndex,...f})=>f);const {data}=await api.put(`/sign/${id}/design`,{signers,fields:clean});setDoc(data);setSigners(data.signers);setFields(data.fields.map(f=>({...f,signerIndex:Math.max(0,data.signers.findIndex(s=>String(s._id)===String(f.signerId)))})));setDirty(false)}catch(e){setError(errorText(e))}finally{setBusy(false)}};
   useEffect(()=>{if(!dirty||!access.canEdit)return;const timer=setTimeout(async()=>{try{const clean=fields.map(({signerIndex,...f})=>f);await api.put(`/sign/${id}/design`,{signers,fields:clean});setDirty(false)}catch(e){setError(errorText(e))}},1400);return()=>clearTimeout(timer)},[dirty,fields,signers,id,access.canEdit]);
@@ -306,9 +342,73 @@ function Designer() {
   if(busy&&!doc)return <div className="loading"><Loader2 className="animate-spin"/></div>;
   if(doc?.status==='Signed')return <SignedDocumentView doc={doc}/>;
   return <Shell><div className="designer"><aside className="designer-sidebar"><div className="sidebar-section"><div className="section-heading"><h2>Documents</h2><button onClick={()=>navigate('/')}>Back</button></div><div className="document-chip"><FileText size={17}/><span>{doc?.title}</span><MoreVertical className="ml-auto" size={17}/></div></div><div className="sidebar-section p-0"><div className="section-heading px-3 pt-4"><h2>Signers</h2>{access.canEdit&&<button onClick={addSigner}>Add</button>}</div><div>{signers.map((s,i)=><div role="button" tabIndex="0" onClick={()=>setActiveSigner(s._id)} className={`signer-row ${String(activeSigner)===String(s._id)?'active':''}`} key={s._id}><span className="signer-dot" style={{background:fieldColors[i%fieldColors.length]}}/><div><b>{s.name}</b><small>{s.email}</small></div><button className="signer-edit" title="Edit signer" onClick={e=>{e.stopPropagation();setSignerModal({...s})}}><PenLine size={15}/></button><b className="signer-count" style={{background:`${fieldColors[i%fieldColors.length]}20`,color:fieldColors[i%fieldColors.length]}}>{fields.filter(f=>String(f.signerId)===String(s._id)).length}</b><MoreVertical size={17}/></div>)}</div></div>{!access.canEdit&&<div className="sidebar-section"><div className="rounded-xl bg-slate-100 p-3 text-xs text-slate-600">You have read-only access to this document.</div></div>}{access.canEdit&&<div className="sidebar-section"><div className="section-heading"><h2>Fields</h2><span>Drag or click</span></div><div className="field-grid signer-palette" style={{'--signer-color':fieldColors[Math.max(0,signers.findIndex(s=>String(s._id)===String(activeSigner)))%fieldColors.length]}}>{fieldTypes.map(type=>{const Icon=fieldIcons[type]||Type;return <button draggable onClick={()=>addField(type,currentPage,.62,.72)} onDragStart={e=>e.dataTransfer.setData('fieldType',type)} key={type}><Icon size={16}/><span>{type}</span></button>})}<button className="col-span-2" onClick={()=>addField('text',currentPage,.62,.72)}><Plus size={17}/>Add Field</button></div></div>}</aside>
-  <main className="designer-main"><div className="designer-toolbar"><div><p className="text-xs text-slate-500">{doc?.referenceNumber}</p><h1 className="font-semibold">{doc?.title} {access.canEdit&&(dirty?<span className="ml-2 text-xs font-normal text-amber-600">Saving…</span>:<span className="ml-2 text-xs font-normal text-emerald-600">Saved</span>)}</h1></div><div className="flex gap-2"><button className="secondary-button" onClick={()=>setHistory(!history)}><Activity size={16}/>History</button>{access.canShare&&<button className="secondary-button" onClick={()=>setSharing(true)}><Share2 size={16}/>Share</button>}{access.canEdit&&<button disabled={busy||!dirty} onClick={save} className="secondary-button">{busy&&<Loader2 size={15} className="animate-spin"/>}Save</button>}{access.canSend&&<button onClick={()=>setSendOpen(true)} className="primary-button"><Send size={16}/>Send</button>}</div></div><div className="pdf-toolbar"><button onClick={()=>goPage(currentPage-1)}><ChevronLeft size={17}/></button><input value={currentPage} onChange={e=>goPage(Number(e.target.value)||1)}/><span>of {doc?.pageCount||1}</span><i/><button onClick={()=>setZoom(Math.max(.6,zoom-.1))}><Minus size={17}/></button><select value={zoom} onChange={e=>setZoom(Number(e.target.value))}><option value="0.75">75%</option><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option></select><button onClick={()=>setZoom(Math.min(1.8,zoom+.1))}><Plus size={17}/></button><button onClick={()=>goPage(currentPage+1)}><ChevronRight size={17}/></button></div>{error&&<div className="error-box mx-auto max-w-2xl">{error}</div>}<div className="pdf-stage p-6" style={{width:`${Math.max(760,850*zoom)}px`}}><PdfPages url={`/api/sign/${id}/pdf`} fields={fields} selected={selected} zoom={zoom} onPages={setPageMetrics} onDrop={access.canEdit?addField:undefined} onFieldChange={access.canEdit?updateField:undefined} onFieldClick={f=>{setSelected(f._id);setCurrentPage(f.pageNumber)}}/></div></main>
-  {signerModal&&<SignerModal signer={signerModal} onClose={()=>setSignerModal(null)} onSave={saveSigner}/>} {sharing&&<ShareModal documentId={id} onClose={()=>setSharing(false)}/>}{history&&<HistoryPanel documentId={id} onClose={()=>setHistory(false)}/>}{selected&&!history&&<aside className="properties"><div className="flex justify-between"><h3 className="font-semibold">Field properties</h3><button onClick={()=>setSelected(null)}><X size={18}/></button></div>{(()=>{const f=fields.find(x=>x._id===selected);if(!f)return null;const update=p=>updateField(selected,p);return <div className="mt-5 space-y-4"><label className="field-label">Label<input value={f.label} onChange={e=>update({label:e.target.value})}/></label><label className="field-label">Placeholder<input value={f.placeholder||''} onChange={e=>update({placeholder:e.target.value})}/></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.required} onChange={e=>update({required:e.target.checked})}/>Required</label><label className="field-label">Signer<select value={f.signerId} onChange={e=>update({signerId:e.target.value,signerIndex:Math.max(0,signers.findIndex(s=>s._id===e.target.value))})}>{signers.map(s=><option key={s._id} value={s._id}>{s.name}</option>)}</select></label><button className="secondary-button w-full" onClick={()=>{const copy={...f,_id:newObjectId(),x:Math.min(.9,f.x+.02),y:Math.min(.9,f.y+.02)};setFields([...fields,copy]);setSelected(copy._id);setDirty(true)}}>Duplicate field</button><button className="danger-button w-full" onClick={()=>{setFields(fields.filter(x=>x._id!==selected));setSelected(null);setDirty(true)}}><Trash2 size={15}/>Delete field</button></div>})()}</aside>}{sendOpen&&<SendModal doc={{...doc,signers}} onClose={()=>setSendOpen(false)} onSend={async form=>{await save();await api.post(`/sign/${id}/send`,form);setSendOpen(false);navigate('/')}}/>}</div></Shell>;
+  <main className="designer-main"><div className="designer-toolbar"><div><p className="text-xs text-slate-500">{doc?.referenceNumber}</p><h1 className="font-semibold">{doc?.title} {access.canEdit&&(dirty?<span className="ml-2 text-xs font-normal text-amber-600">Saving…</span>:<span className="ml-2 text-xs font-normal text-emerald-600">Saved</span>)}</h1></div><div className="flex gap-2"><button className="secondary-button" onClick={()=>setHistory(!history)}><Activity size={16}/>History</button>{access.canShare&&<button className="secondary-button" onClick={()=>setSharing(true)}><Share2 size={16}/>Share</button>}{access.canEdit&&<button disabled={busy||!dirty} onClick={save} className="secondary-button">{busy&&<Loader2 size={15} className="animate-spin"/>}Save</button>}{access.canSend&&<button onClick={()=>setSendOpen(true)} className="primary-button"><Send size={16}/>Send</button>}</div></div><div className="pdf-toolbar"><button onClick={()=>goPage(currentPage-1)}><ChevronLeft size={17}/></button><input value={currentPage} onChange={e=>goPage(Number(e.target.value)||1)}/><span>of {doc?.pageCount||1}</span><i/><button onClick={()=>setZoom(Math.max(.6,zoom-.1))}><Minus size={17}/></button><select value={zoom} onChange={e=>setZoom(Number(e.target.value))}><option value="0.75">75%</option><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option></select><button onClick={()=>setZoom(Math.min(1.8,zoom+.1))}><Plus size={17}/></button><button onClick={()=>goPage(currentPage+1)}><ChevronRight size={17}/></button></div>{error&&<div className="error-box mx-auto max-w-2xl">{error}</div>}<div className="pdf-stage p-6" style={{width:`${Math.max(760,850*zoom)}px`}}><PdfPages url={`/api/sign/${id}/pdf`} fields={fields} selected={selected} zoom={zoom} onPages={setPageMetrics} onDrop={access.canEdit?addField:undefined} onFieldChange={access.canEdit?updateField:undefined} onFieldContext={access.canEdit?((f,rect)=>setProperties({fieldId:f._id,rect})):undefined} onFieldClick={f=>{setSelected(f._id);setCurrentPage(f.pageNumber);setProperties(null)}}/></div></main>
+  {signerModal&&<SignerModal signer={signerModal} onClose={()=>setSignerModal(null)} onSave={saveSigner}/>} {sharing&&<ShareModal documentId={id} onClose={()=>setSharing(false)}/>}{history&&<HistoryPanel documentId={id} onClose={()=>setHistory(false)}/>}{properties&&(()=>{const f=fields.find(x=>x._id===properties.fieldId);if(!f)return null;return <FieldPropertiesPopover
+    field={f} anchor={properties.rect}
+    onChange={changes=>updateField(f._id,changes)}
+    onDuplicate={()=>{const copy=duplicateField(f._id);if(copy)setProperties(null)}}
+    onDelete={()=>deleteField(f._id)}
+    onSave={()=>{setProperties(null);save()}}
+    onClose={()=>setProperties(null)}/>})()}
+  {sendOpen&&<SendModal doc={{...doc,signers}} onClose={()=>setSendOpen(false)} onSend={async form=>{await save();await api.post(`/sign/${id}/send`,form);setSendOpen(false);navigate('/')}}/>}</div></Shell>;
 }
+// Right-clicking a placed field opens its settings next to the field itself,
+// so the page underneath stays visible while the field is being adjusted.
+const ALIGNMENTS = [['left', AlignLeft], ['center', AlignCenter], ['right', AlignRight]];
+function FieldPropertiesPopover({ field, anchor, onChange, onDuplicate, onDelete, onSave, onClose }) {
+  const box = useRef(null);
+  const [position, setPosition] = useState({ left: anchor.right + 12, top: anchor.top });
+
+  // Measure once mounted, then pull the panel back inside the viewport. Falls
+  // to the left of the field when there is no room on the right.
+  useEffect(() => {
+    const element = box.current;
+    if (!element) return;
+    const { width, height } = element.getBoundingClientRect();
+    const margin = 10;
+    let left = anchor.right + 12;
+    if (left + width + margin > window.innerWidth) left = anchor.left - width - 12;
+    setPosition({
+      left: Math.max(margin, Math.min(left, window.innerWidth - width - margin)),
+      top: Math.max(margin, Math.min(anchor.top, window.innerHeight - height - margin)),
+    });
+  }, [anchor.left, anchor.right, anchor.top]);
+
+  useEffect(() => {
+    const dismiss = event => { if (!box.current?.contains(event.target)) onClose(); };
+    const escape = event => { if (event.key === 'Escape') onClose(); };
+    // Deferred so the right-click that opened this panel does not close it again.
+    const timer = setTimeout(() => document.addEventListener('pointerdown', dismiss), 0);
+    window.addEventListener('keydown', escape);
+    return () => { clearTimeout(timer); document.removeEventListener('pointerdown', dismiss); window.removeEventListener('keydown', escape); };
+  }, [onClose]);
+
+  const title = field.type.charAt(0).toUpperCase() + field.type.slice(1);
+  return <div ref={box} className="field-popover" style={position} onContextMenu={event => event.preventDefault()}>
+    <div className="field-popover-header">
+      <b>{title}</b>
+      <button className="field-popover-close" title="Close" onClick={onClose}><X size={14} /></button>
+    </div>
+    <div className="field-popover-body">
+      <label className="field-popover-label" htmlFor="field-placeholder">Placeholder</label>
+      <textarea id="field-placeholder" rows="2" value={field.placeholder || ''} onChange={event => onChange({ placeholder: event.target.value })} />
+      <p className="field-popover-label mt-4">Alignment</p>
+      <div className="field-popover-align">
+        {ALIGNMENTS.map(([value, Icon]) => <button key={value} title={`Align ${value}`} className={(field.alignment || 'left') === value ? 'active' : ''} onClick={() => onChange({ alignment: value })}><Icon size={16} /></button>)}
+      </div>
+      <label className="field-popover-check"><input type="checkbox" checked={!!field.required} onChange={event => onChange({ required: event.target.checked })} />Mandatory field</label>
+      <label className="field-popover-check"><input type="checkbox" checked={!!field.readOnly} onChange={event => onChange({ readOnly: event.target.checked })} />Read-only</label>
+    </div>
+    <div className="field-popover-footer">
+      <button className="field-popover-save" onClick={onSave}>Save</button>
+      <div className="field-popover-actions">
+        <button title="Duplicate field" onClick={onDuplicate}><Copy size={16} /></button>
+        <button title="Delete field" onClick={onDelete}><Trash2 size={16} /></button>
+      </div>
+    </div>
+  </div>;
+}
+
 function SendModal({doc,onClose,onSend}) {
   const d=new Date(Date.now()+7*86400000).toISOString().slice(0,10);
   const [form,setForm]=useState({expiresAt:d,subject:`Signature Request – ${doc.title}`,message:'Please review and electronically sign the attached document.',cc:'',bcc:'',reminders:true}),[busy,setBusy]=useState(false),[error,setError]=useState('');

@@ -19,6 +19,8 @@ const fieldSchema = new mongoose.Schema({
   width: { type: Number, required: true, min: 0.01, max: 1 },
   height: { type: Number, required: true, min: 0.01, max: 1 },
   required: { type: Boolean, default: true },
+  readOnly: { type: Boolean, default: false },
+  alignment: { type: String, enum: ['left', 'center', 'right'], default: 'left' },
   label: String,
   placeholder: String,
   settings: mongoose.Schema.Types.Mixed,
