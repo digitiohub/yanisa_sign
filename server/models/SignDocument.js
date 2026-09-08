@@ -16,8 +16,9 @@ const fieldSchema = new mongoose.Schema({
   type: { type: String, required: true, enum: ['signature', 'initials', 'name', 'email', 'phone', 'company', 'text', 'multiline', 'checkbox', 'radio', 'selection', 'date', 'strikethrough', 'stamp'] },
   x: { type: Number, required: true, min: 0, max: 1 },
   y: { type: Number, required: true, min: 0, max: 1 },
-  width: { type: Number, required: true, min: 0.01, max: 1 },
-  height: { type: Number, required: true, min: 0.01, max: 1 },
+  // Authors size fields freely, so the floor here only rejects a zero-area box.
+  width: { type: Number, required: true, min: 0.0001, max: 1 },
+  height: { type: Number, required: true, min: 0.0001, max: 1 },
   required: { type: Boolean, default: true },
   readOnly: { type: Boolean, default: false },
   alignment: { type: String, enum: ['left', 'center', 'right'], default: 'left' },

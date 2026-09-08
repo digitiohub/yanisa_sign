@@ -12,23 +12,25 @@ export const FIELD_SIZES = {
   radio:{width:26,height:26}, selection:{width:150,height:30}, date:{width:150,height:30},
   strikethrough:{width:150,height:24}, stamp:{width:100,height:70},
 };
-export const FIELD_MIN_SIZES = {
-  signature:{width:100,height:40}, initials:{width:60,height:30}, multiline:{width:100,height:50},
-  checkbox:{width:20,height:20}, radio:{width:20,height:20}, stamp:{width:60,height:40},
-  strikethrough:{width:40,height:12},
-};
+// Nothing is locked to a "sensible" minimum: a field resizes to whatever the
+// author drags it to. The only floor is a few pixels, so the box keeps a
+// grabbable corner and cannot be shrunk to nothing by accident.
+export const MIN_FIELD_PX = 4;
 // A4 rendered at the viewer's base scale, used only until a page has rendered.
 export const FALLBACK_PAGE = { baseWidth:803, baseHeight:1136 };
 const DEFAULT_SIZE = { width:140, height:36 };
-const DEFAULT_MIN = { width:70, height:28 };
+const DEFAULT_MIN = { width:MIN_FIELD_PX, height:MIN_FIELD_PX };
 const DRAG_SNAP_PX = 2;   // gentle grid so a field can sit flush in a table cell
 const RESIZE_SNAP_PX = 1; // whole pixels only, no sub-pixel jitter
 // Hold Alt during either gesture to move/resize completely free of the grid.
 
 export const getDefaultFieldSize = type => ({ ...(FIELD_SIZES[type] || DEFAULT_SIZE) });
-export const getMinimumFieldSize = type => ({ ...(FIELD_MIN_SIZES[type] || DEFAULT_MIN) });
+export const getMinimumFieldSize = () => ({ ...DEFAULT_MIN });
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+// A hard floor only so a field never becomes a zero-area box the browser
+// cannot hit-test. MIN_FIELD_PX is what the author actually runs into.
+const MIN_FRACTION = 0.0001;
 
 // page: { width, height } are the page's current on-screen size in CSS pixels
 // (zoom included); { baseWidth, baseHeight } are the same page at 100% zoom.
@@ -41,14 +43,35 @@ export function screenToDocumentCoordinates(clientX, clientY, pageRect) {
 export function documentToScreenCoordinates(field, pageRect) {
   return { left: field.x * pageRect.width, top: field.y * pageRect.height, width: field.width * pageRect.width, height: field.height * pageRect.height };
 }
+const basisOf = page => ({
+  baseWidth: page?.baseWidth || FALLBACK_PAGE.baseWidth,
+  baseHeight: page?.baseHeight || FALLBACK_PAGE.baseHeight,
+});
+
 // Pixel size at 100% zoom -> stored fraction of the page.
 export function sizeToFractions(size, page) {
-  const base = { baseWidth: page?.baseWidth || FALLBACK_PAGE.baseWidth, baseHeight: page?.baseHeight || FALLBACK_PAGE.baseHeight };
-  return { width: clamp(pixelsToFraction(size.width, base.baseWidth), 0.01, 1), height: clamp(pixelsToFraction(size.height, base.baseHeight), 0.01, 1) };
+  const base = basisOf(page);
+  return { width: clamp(pixelsToFraction(size.width, base.baseWidth), MIN_FRACTION, 1), height: clamp(pixelsToFraction(size.height, base.baseHeight), MIN_FRACTION, 1) };
+}
+
+// The designer also lets a size be typed in, which is the only way back for a
+// field that has been dragged down to a few pixels. Sizes are shown and read
+// as CSS pixels at 100% zoom, matching how FIELD_SIZES is authored above.
+export function fieldSizeInPixels(field, page) {
+  const base = basisOf(page);
+  return { width: Math.round(field.width * base.baseWidth), height: Math.round(field.height * base.baseHeight) };
+}
+// Returns the { width, height } fractions for a field resized to `pixels`,
+// held between MIN_FIELD_PX and whatever room is left on the page.
+export function fieldSizeFromPixels(field, pixels, page) {
+  const base = basisOf(page);
+  const width = clamp(pixelsToFraction(Math.max(MIN_FIELD_PX, pixels.width), base.baseWidth), MIN_FRACTION, 1 - field.x);
+  const height = clamp(pixelsToFraction(Math.max(MIN_FIELD_PX, pixels.height), base.baseHeight), MIN_FRACTION, 1 - field.y);
+  return { width, height };
 }
 
 export function clampFieldToPage(field) {
-  const width = clamp(field.width, 0.01, 1), height = clamp(field.height, 0.01, 1);
+  const width = clamp(field.width, MIN_FRACTION, 1), height = clamp(field.height, MIN_FRACTION, 1);
   return { ...field, width, height, x: clamp(field.x, 0, 1 - width), y: clamp(field.y, 0, 1 - height) };
 }
 
@@ -75,8 +98,8 @@ const snapFraction = (fraction, base, grid) => (base > 0 ? (Math.round((fraction
 // measured against the geometry captured at pointerdown. Dividing by the page's
 // current on-screen size keeps 1 pointer pixel = 1 visual pixel at every zoom
 // level, because the page element is already scaled by the zoom.
-export function calculateResize({ origin, dx, dy, page, type, snap = true }) {
-  const min = sizeToFractions(getMinimumFieldSize(type), page);
+export function calculateResize({ origin, dx, dy, page, snap = true }) {
+  const min = sizeToFractions(getMinimumFieldSize(), page);
   let width = origin.width + dx / page.width;
   let height = origin.height + dy / page.height;
   if (snap) { width = snapFraction(width, page.baseWidth, RESIZE_SNAP_PX); height = snapFraction(height, page.baseHeight, RESIZE_SNAP_PX); }

@@ -347,6 +347,35 @@
   border-color: #22b3c4;
   outline: none;
 }
+.field-popover-size {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 9px;
+}
+.field-popover-size label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  padding: 0 8px;
+}
+.field-popover-size label:focus-within {
+  border-color: #22b3c4;
+}
+.field-popover-size span {
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+.field-popover-size input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  padding: 7px 0;
+  font-size: 0.8rem;
+  outline: none;
+}
+
 .field-popover-align {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -902,6 +931,29 @@ td {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* A field takes any size the author drags it to. Past these sizes the padding,
+   caption and full-size grip stop fitting, so they give way to the box itself
+   and the field stays a clean rectangle instead of a crowded one. */
+.placed-field.compact {
+  padding: 0 5px 0 2px;
+  font-size: 9px;
+}
+.placed-field.compact > i {
+  width: 8px;
+  height: 8px;
+}
+.placed-field.micro {
+  padding: 0;
+}
+.placed-field.micro .field-text,
+.placed-field.micro .field-icon {
+  display: none;
+}
+.placed-field.micro > i {
+  width: 5px;
+  height: 5px;
+}
+
 /* Read-only fields the signer cannot type into are drawn hollow. */
 .placed-field.read-only {
   border-style: dashed;

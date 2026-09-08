@@ -3,7 +3,7 @@ import { Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import * as pdfjs from 'pdfjs-dist';
 import { Activity, AlignCenter, AlignLeft, AlignRight, ArrowLeft, Building2, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Copy, Download, FileSignature, FileText, Loader2, LogOut, Mail, Minus, MoreVertical, PenLine, Phone, Plus, Search, Send, Share2, ShieldCheck, Stamp, Strikethrough, Trash2, Type, Upload, User, X } from 'lucide-react';
-import { FALLBACK_PAGE, calculateDrag, calculateResize, clampFieldToPage, findFreeSpot, getDefaultFieldSize, sizeToFractions } from './fieldGeometry';
+import { FALLBACK_PAGE, MIN_FIELD_PX, calculateDrag, calculateResize, clampFieldToPage, fieldSizeFromPixels, fieldSizeInPixels, findFreeSpot, getDefaultFieldSize, sizeToFractions } from './fieldGeometry';
 import { api, errorText, formatDate, formatDateTime, getAccessToken, initials } from './api';
 import { AuthProvider, Protected, useAuth } from './auth-context';
 import { AcceptInvitePage, ForgotPasswordPage, LoginPage } from './auth-pages';
@@ -192,10 +192,19 @@ function Dashboard() {
   </main></Shell>;
 }
 
+// A field small enough that a caption and normal padding no longer fit is
+// drawn stripped back, so shrinking one still looks deliberate on the page.
+function fieldDensity(field, pageWidth, pageHeight) {
+  const width = field.width * pageWidth, height = field.height * pageHeight;
+  if (width < 26 || height < 13) return 'micro';
+  if (width < 58 || height < 24) return 'compact';
+  return '';
+}
+
 function PdfPages({ url, fields=[], onDrop, onPages, onFieldClick, onFieldContext, onFieldChange, selected, interactive=false, values={}, onValue, zoom=1 }) {
   const [pages,setPages]=useState([]); useEffect(()=>{let live=true; pdfjs.getDocument({url,httpHeaders:getAccessToken()?{Authorization:`Bearer ${getAccessToken()}`}:{}}).promise.then(async pdf=>{const list=[];for(let i=1;i<=pdf.numPages;i++){const page=await pdf.getPage(i);const viewport=page.getViewport({scale:1.35*zoom});const canvas=document.createElement('canvas');canvas.width=viewport.width;canvas.height=viewport.height;await page.render({canvasContext:canvas.getContext('2d'),viewport}).promise;list.push({number:i,url:canvas.toDataURL(),ratio:viewport.height/viewport.width,baseWidth:viewport.width/zoom,baseHeight:viewport.height/zoom});}if(live){setPages(list);onPages?.(list)}});return()=>{live=false}},[url,zoom]);
   const startPointer=(e,f,mode='move')=>{if(interactive||!onFieldChange||e.button!==0)return;const pageEl=e.currentTarget.closest('.pdf-page');if(!pageEl)return;e.preventDefault();e.stopPropagation();onFieldClick?.(f);const handle=e.currentTarget,pointerId=e.pointerId,origin={...f},rect=pageEl.getBoundingClientRect(),rendered=pages.find(p=>p.number===f.pageNumber),page={width:rect.width,height:rect.height,baseWidth:rendered?.baseWidth||rect.width,baseHeight:rendered?.baseHeight||rect.height},sx=e.clientX,sy=e.clientY,restoreSelect=document.body.style.userSelect;document.body.style.userSelect='none';try{handle.setPointerCapture(pointerId)}catch{}
-    const move=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy,snap=!ev.altKey;onFieldChange(f._id,mode==='resize'?calculateResize({origin,dx,dy,page,type:f.type,snap}):calculateDrag({origin,dx,dy,page,snap}))};
+    const move=ev=>{const dx=ev.clientX-sx,dy=ev.clientY-sy,snap=!ev.altKey;onFieldChange(f._id,mode==='resize'?calculateResize({origin,dx,dy,page,snap}):calculateDrag({origin,dx,dy,page,snap}))};
     const up=()=>{try{handle.releasePointerCapture(pointerId)}catch{}document.body.style.userSelect=restoreSelect;window.removeEventListener('pointermove',move);window.removeEventListener('pointerup',up);window.removeEventListener('pointercancel',up)};
     window.addEventListener('pointermove',move);window.addEventListener('pointerup',up);window.addEventListener('pointercancel',up)};
   const openContext=(e,f)=>{if(interactive||!onFieldContext)return;e.preventDefault();e.stopPropagation();onFieldClick?.(f);onFieldContext(f,e.currentTarget.getBoundingClientRect())};
@@ -203,8 +212,11 @@ function PdfPages({ url, fields=[], onDrop, onPages, onFieldClick, onFieldContex
     <img src={p.url}/>
     {fields.filter(f=>f.pageNumber===p.number).map((f,i)=>{
       const FieldIcon=fieldIcons[f.type]||Type, glyphOnly=f.type==='checkbox'||f.type==='radio';
+      // Fields resize to any size, so a small one drops its padding, caption and
+      // most of its grip rather than letting them overflow the box.
+      const density=fieldDensity(f,p.baseWidth*zoom,p.baseHeight*zoom);
       return <div key={f._id||i} data-field-type={f.type} onPointerDown={e=>startPointer(e,f)} onClick={()=>onFieldClick?.(f)} onContextMenu={e=>openContext(e,f)}
-        className={`placed-field ${interactive?'interactive':''} ${selected===f._id?'selected':''} ${f.readOnly?'read-only':''}`}
+        className={`placed-field ${density} ${interactive?'interactive':''} ${selected===f._id?'selected':''} ${f.readOnly?'read-only':''}`}
         style={{left:`${f.x*100}%`,top:`${f.y*100}%`,width:`${f.width*100}%`,height:`${f.height*100}%`,'--field-color':fieldColors[f.signerIndex||0],textAlign:f.alignment||'left'}}>
         {interactive
           ? <FieldInput field={f} value={values[f._id]} onChange={v=>onValue(f,v)}/>
@@ -344,7 +356,7 @@ function Designer() {
   return <Shell><div className="designer"><aside className="designer-sidebar"><div className="sidebar-section"><div className="section-heading"><h2>Documents</h2><button onClick={()=>navigate('/')}>Back</button></div><div className="document-chip"><FileText size={17}/><span>{doc?.title}</span><MoreVertical className="ml-auto" size={17}/></div></div><div className="sidebar-section p-0"><div className="section-heading px-3 pt-4"><h2>Signers</h2>{access.canEdit&&<button onClick={addSigner}>Add</button>}</div><div>{signers.map((s,i)=><div role="button" tabIndex="0" onClick={()=>setActiveSigner(s._id)} className={`signer-row ${String(activeSigner)===String(s._id)?'active':''}`} key={s._id}><span className="signer-dot" style={{background:fieldColors[i%fieldColors.length]}}/><div><b>{s.name}</b><small>{s.email}</small></div><button className="signer-edit" title="Edit signer" onClick={e=>{e.stopPropagation();setSignerModal({...s})}}><PenLine size={15}/></button><b className="signer-count" style={{background:`${fieldColors[i%fieldColors.length]}20`,color:fieldColors[i%fieldColors.length]}}>{fields.filter(f=>String(f.signerId)===String(s._id)).length}</b><MoreVertical size={17}/></div>)}</div></div>{!access.canEdit&&<div className="sidebar-section"><div className="rounded-xl bg-slate-100 p-3 text-xs text-slate-600">You have read-only access to this document.</div></div>}{access.canEdit&&<div className="sidebar-section"><div className="section-heading"><h2>Fields</h2><span>Drag or click</span></div><div className="field-grid signer-palette" style={{'--signer-color':fieldColors[Math.max(0,signers.findIndex(s=>String(s._id)===String(activeSigner)))%fieldColors.length]}}>{fieldTypes.map(type=>{const Icon=fieldIcons[type]||Type;return <button draggable onClick={()=>addField(type,currentPage,.62,.72)} onDragStart={e=>e.dataTransfer.setData('fieldType',type)} key={type}><Icon size={16}/><span>{type}</span></button>})}<button className="col-span-2" onClick={()=>addField('text',currentPage,.62,.72)}><Plus size={17}/>Add Field</button></div></div>}</aside>
   <main className="designer-main"><div className="designer-toolbar"><div><p className="text-xs text-slate-500">{doc?.referenceNumber}</p><h1 className="font-semibold">{doc?.title} {access.canEdit&&(dirty?<span className="ml-2 text-xs font-normal text-amber-600">Saving…</span>:<span className="ml-2 text-xs font-normal text-emerald-600">Saved</span>)}</h1></div><div className="flex gap-2"><button className="secondary-button" onClick={()=>setHistory(!history)}><Activity size={16}/>History</button>{access.canShare&&<button className="secondary-button" onClick={()=>setSharing(true)}><Share2 size={16}/>Share</button>}{access.canEdit&&<button disabled={busy||!dirty} onClick={save} className="secondary-button">{busy&&<Loader2 size={15} className="animate-spin"/>}Save</button>}{access.canSend&&<button onClick={()=>setSendOpen(true)} className="primary-button"><Send size={16}/>Send</button>}</div></div><div className="pdf-toolbar"><button onClick={()=>goPage(currentPage-1)}><ChevronLeft size={17}/></button><input value={currentPage} onChange={e=>goPage(Number(e.target.value)||1)}/><span>of {doc?.pageCount||1}</span><i/><button onClick={()=>setZoom(Math.max(.6,zoom-.1))}><Minus size={17}/></button><select value={zoom} onChange={e=>setZoom(Number(e.target.value))}><option value="0.75">75%</option><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option></select><button onClick={()=>setZoom(Math.min(1.8,zoom+.1))}><Plus size={17}/></button><button onClick={()=>goPage(currentPage+1)}><ChevronRight size={17}/></button></div>{error&&<div className="error-box mx-auto max-w-2xl">{error}</div>}<div className="pdf-stage p-6" style={{width:`${Math.max(760,850*zoom)}px`}}><PdfPages url={`/api/sign/${id}/pdf`} fields={fields} selected={selected} zoom={zoom} onPages={setPageMetrics} onDrop={access.canEdit?addField:undefined} onFieldChange={access.canEdit?updateField:undefined} onFieldContext={access.canEdit?((f,rect)=>setProperties({fieldId:f._id,rect})):undefined} onFieldClick={f=>{setSelected(f._id);setCurrentPage(f.pageNumber);setProperties(null)}}/></div></main>
   {signerModal&&<SignerModal signer={signerModal} onClose={()=>setSignerModal(null)} onSave={saveSigner}/>} {sharing&&<ShareModal documentId={id} onClose={()=>setSharing(false)}/>}{history&&<HistoryPanel documentId={id} onClose={()=>setHistory(false)}/>}{properties&&(()=>{const f=fields.find(x=>x._id===properties.fieldId);if(!f)return null;return <FieldPropertiesPopover
-    field={f} anchor={properties.rect}
+    field={f} anchor={properties.rect} page={pageMetrics.find(m=>m.number===f.pageNumber)||pageMetrics[0]||FALLBACK_PAGE}
     onChange={changes=>updateField(f._id,changes)}
     onDuplicate={()=>{const copy=duplicateField(f._id);if(copy)setProperties(null)}}
     onDelete={()=>deleteField(f._id)}
@@ -355,7 +367,7 @@ function Designer() {
 // Right-clicking a placed field opens its settings next to the field itself,
 // so the page underneath stays visible while the field is being adjusted.
 const ALIGNMENTS = [['left', AlignLeft], ['center', AlignCenter], ['right', AlignRight]];
-function FieldPropertiesPopover({ field, anchor, onChange, onDuplicate, onDelete, onSave, onClose }) {
+function FieldPropertiesPopover({ field, anchor, page, onChange, onDuplicate, onDelete, onSave, onClose }) {
   const box = useRef(null);
   const [position, setPosition] = useState({ left: anchor.right + 12, top: anchor.top });
 
@@ -383,6 +395,19 @@ function FieldPropertiesPopover({ field, anchor, onChange, onDuplicate, onDelete
     return () => { clearTimeout(timer); document.removeEventListener('pointerdown', dismiss); window.removeEventListener('keydown', escape); };
   }, [onClose]);
 
+  // Width and height in pixels at 100% zoom. Typing a size is exact where
+  // dragging the corner is not, and it is how a field that has been shrunk to a
+  // few pixels gets grown back without hunting for its grip.
+  const pixels = fieldSizeInPixels(field, page);
+  const [sizeDraft, setSizeDraft] = useState(null);
+  const shownSize = sizeDraft || { width: String(pixels.width), height: String(pixels.height) };
+  const editSize = (axis, text) => {
+    const next = { ...shownSize, [axis]: text };
+    setSizeDraft(next);
+    if (!text.trim() || !(Number(text) > 0)) return; // half-typed, wait for a usable number
+    onChange(fieldSizeFromPixels(field, { width: Number(next.width) || pixels.width, height: Number(next.height) || pixels.height }, page));
+  };
+
   const title = field.type.charAt(0).toUpperCase() + field.type.slice(1);
   return <div ref={box} className="field-popover" style={position} onContextMenu={event => event.preventDefault()}>
     <div className="field-popover-header">
@@ -392,6 +417,15 @@ function FieldPropertiesPopover({ field, anchor, onChange, onDuplicate, onDelete
     <div className="field-popover-body">
       <label className="field-popover-label" htmlFor="field-placeholder">Placeholder</label>
       <textarea id="field-placeholder" rows="2" value={field.placeholder || ''} onChange={event => onChange({ placeholder: event.target.value })} />
+      <p className="field-popover-label mt-4">Size (px)</p>
+      <div className="field-popover-size">
+        {[['width', 'W'], ['height', 'H']].map(([axis, caption]) => <label key={axis}>
+          <span>{caption}</span>
+          <input type="number" min={MIN_FIELD_PX} step="1" value={shownSize[axis]}
+            onChange={event => editSize(axis, event.target.value)}
+            onBlur={() => setSizeDraft(null)} />
+        </label>)}
+      </div>
       <p className="field-popover-label mt-4">Alignment</p>
       <div className="field-popover-align">
         {ALIGNMENTS.map(([value, Icon]) => <button key={value} title={`Align ${value}`} className={(field.alignment || 'left') === value ? 'active' : ''} onClick={() => onChange({ alignment: value })}><Icon size={16} /></button>)}
