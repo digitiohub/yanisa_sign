@@ -20,8 +20,10 @@ const SYSTEM_ROLES = [
   { key: 'super_admin', name: 'Super Admin', rank: 100, description: 'Unrestricted access to everything in the organisation.', permissions: ['*'] },
   { key: 'admin', name: 'Admin', rank: 80, description: 'Manages users, documents and templates. No system-level settings.',
     permissions: ['users.create','users.view','users.edit','roles.view','documents.create','documents.view','documents.view_team','documents.view_all','documents.edit','documents.delete','documents.send','documents.download','documents.share','templates.create','templates.view','templates.edit','templates.delete','signers.create','signers.view','signers.edit','signers.delete','reports.view','activity.view','audit.view','sessions.revoke','settings.view'] },
-  { key: 'manager', name: 'Manager', rank: 60, description: 'Runs a workspace: team documents, team activity and reports.',
-    permissions: ['users.view','documents.create','documents.view','documents.view_team','documents.edit','documents.send','documents.download','documents.share','templates.create','templates.view','templates.edit','signers.create','signers.view','signers.edit','signers.delete','reports.view','activity.view'] },
+  // Administration is for administrators only, so a Manager gets neither
+  // users.view nor activity.view - the two permissions that open it.
+  { key: 'manager', name: 'Manager', rank: 60, description: 'Runs a workspace: team documents, templates and reports.',
+    permissions: ['documents.create','documents.view','documents.view_team','documents.edit','documents.send','documents.download','documents.share','templates.create','templates.view','templates.edit','signers.create','signers.view','signers.edit','signers.delete','reports.view'] },
   { key: 'editor', name: 'Editor', rank: 40, description: 'Prepares and sends their own documents.',
     permissions: ['documents.create','documents.view','documents.edit','documents.send','documents.download','documents.share','templates.view','signers.create','signers.view','signers.edit','signers.delete'] },
   { key: 'viewer', name: 'Viewer', rank: 20, description: 'Read-only access to permitted documents.',

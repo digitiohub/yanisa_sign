@@ -52,6 +52,9 @@ test('built-in roles keep their intended limits', () => {
   assert.equal(hasPermission(role('editor'), 'documents.view_all'), false);
   assert.equal(hasPermission(role('manager'), 'documents.view_team'), true);
   assert.equal(hasPermission(role('manager'), 'documents.view_all'), false);
+  // Administration opens on any one of these, so a Manager must hold none.
+  for (const permission of ['users.view', 'activity.view', 'audit.view', 'roles.view'])
+    assert.equal(hasPermission(role('manager'), permission), false, `managers do not reach Administration through ${permission}`);
   assert.equal(hasPermission(role('admin'), 'documents.view_all'), true);
   assert.equal(hasPermission(role('admin'), 'settings.edit'), false, 'admins do not get system settings by default');
   assert.equal(hasPermission(role('super_admin'), 'settings.edit'), true);

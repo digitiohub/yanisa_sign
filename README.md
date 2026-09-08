@@ -42,7 +42,7 @@ Five roles ship as built-ins and more can be created under Administration → Ro
 | --- | --- | --- |
 | Super Admin | Owns the organisation | — |
 | Admin | Manages users, documents and templates | System settings, creating Super Admins |
-| Manager | Runs a workspace | See documents outside their team |
+| Manager | Runs a workspace | Open Administration, see documents outside their team |
 | Editor | Prepares and sends their own documents | Manage users, delete documents |
 | Viewer | Read-only on permitted documents | Create, edit, send |
 
