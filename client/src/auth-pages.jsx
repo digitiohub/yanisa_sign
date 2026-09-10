@@ -82,6 +82,12 @@ export function LoginPage() {
   const auth = useAuth();
   const navigate = useNavigate();
   const [form, setForm] = useState({ email: '', password: '', rememberMe: true });
+  // 'password' collects credentials; 'otp' collects the emailed code. The
+  // password is kept in state only so "Resend" can re-run the first step -
+  // there is no endpoint that reissues a code without it.
+  const [step, setStep] = useState('password');
+  const [challenge, setChallenge] = useState(null);
+  const [otp, setOtp] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -90,12 +96,47 @@ export function LoginPage() {
   const submit = async event => {
     event.preventDefault();
     setBusy(true); setError('');
-    try { await auth.signIn(form); navigate('/', { replace: true }); }
-    catch (failure) {
+    try {
+      const result = await auth.signIn(form);
+      if (result?.mfaRequired) { setChallenge(result); setOtp(''); setStep('otp'); return; }
+      navigate('/', { replace: true });
+    } catch (failure) {
       setError(errorText(failure));
       if (failure.response?.data?.code === 'invitation_pending') navigate(`/accept-invite?email=${encodeURIComponent(form.email)}`);
     } finally { setBusy(false); }
   };
+
+  const verify = async event => {
+    event.preventDefault();
+    setBusy(true); setError('');
+    try {
+      await auth.verifyLoginOtp({ email: form.email, otp, rememberMe: form.rememberMe });
+      navigate('/', { replace: true });
+    } catch (failure) {
+      setError(errorText(failure));
+      // An expired or discarded code cannot be retried - the password step has
+      // to run again to mint a new one.
+      if (failure.response?.data?.code === 'restart_login') { setStep('password'); setOtp(''); }
+    } finally { setBusy(false); }
+  };
+
+  // Re-running the password step reissues the code. Inside the cooldown the
+  // server returns the same one, so an already-delivered email stays valid.
+  const resend = async () => {
+    setError('');
+    try { await auth.signIn(form); } catch (failure) { setError(errorText(failure)); }
+  };
+
+  if (step === 'otp') return <AuthShell
+    title="Check your email"
+    subtitle={`We sent a 6-digit code to ${challenge?.maskedEmail || form.email}. It expires in ${challenge?.expiresInMinutes || 5} minutes.`}
+  >
+    {error && <div className="error-box">{error}</div>}
+    <div className="mt-4"><OtpInput value={otp} onChange={setOtp} disabled={busy} /></div>
+    <button className="primary-button mt-5 w-full" disabled={busy || otp.length !== 6} onClick={verify}>{busy && <Loader2 className="animate-spin" size={17} />}Verify and sign in</button>
+    <ResendButton onResend={resend} seconds={challenge?.resendAfterSeconds || 45} />
+    <button type="button" className="auth-back" onClick={() => { setStep('password'); setOtp(''); setError(''); }}><ArrowLeft size={15} />Use a different account</button>
+  </AuthShell>;
 
   return <div className="auth-page">
     <form onSubmit={submit} className="auth-card">
@@ -109,7 +150,8 @@ export function LoginPage() {
         <label className="checkbox-label"><input type="checkbox" checked={form.rememberMe} onChange={event => setForm({ ...form, rememberMe: event.target.checked })} />Remember me</label>
         <Link className="link-button" to="/forgot-password">Forgot password?</Link>
       </div>
-      <button disabled={busy} className="primary-button mt-6 w-full">{busy && <Loader2 className="animate-spin" size={17} />}Sign in</button>
+      <button disabled={busy} className="primary-button mt-6 w-full">{busy && <Loader2 className="animate-spin" size={17} />}Continue</button>
+      <p className="auth-hint">We will email you a 6-digit code to finish signing in.</p>
     </form>
   </div>;
 }
@@ -179,10 +221,13 @@ export function ForgotPasswordPage() {
 export function AcceptInvitePage() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const [step, setStep] = useState('otp');
+  // A ?token= link goes straight to choosing a password. The code-based path
+  // is kept for invitations that were sent before links replaced them.
+  const linkToken = params.get('token') || '';
+  const [step, setStep] = useState(linkToken ? 'password' : 'otp');
   const [email, setEmail] = useState(params.get('email') || '');
   const [otp, setOtp] = useState('');
-  const [invitationToken, setInvitationToken] = useState('');
+  const [invitationToken, setInvitationToken] = useState(linkToken);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState('');

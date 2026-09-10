@@ -9,6 +9,7 @@
     "build": "cd client && npm run build",
     "start": "node server/index.js",
     "seed:demo": "node scripts/seed-demo-users.js",
+    "login:code": "node scripts/show-login-code.js",
     "test": "node --test server/tests/",
     "lint": "node --check server/index.js && node --check server/routes/sign.js"
   },
@@ -26,6 +27,7 @@
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
     "nodemailer": "^9.0.3",
+    "otplib": "^13.5.0",
     "pdf-lib": "^1.10.0",
     "pdfjs-dist": "^4.6.0",
     "ua-parser-js": "^2.0.10",

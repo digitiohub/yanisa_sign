@@ -38,8 +38,19 @@ export function AuthProvider({ children }) {
 
   const value = useMemo(() => ({
     ...state,
+    // Step one: the password. A correct password does not sign anyone in - it
+    // returns a challenge, and the caller then has to complete verifyLoginOtp.
     signIn: async credentials => {
       const { data } = await api.post('/auth/login', credentials);
+      if (data.mfaRequired) return data;
+      // Kept for the case where the server stops requiring a second factor.
+      setAccessToken(data.accessToken);
+      await loadSession();
+      return { user: data.user };
+    },
+    // Step two: the emailed code, which is what actually opens the session.
+    verifyLoginOtp: async payload => {
+      const { data } = await api.post('/auth/login/verify-otp', payload);
       setAccessToken(data.accessToken);
       await loadSession();
       return data.user;

@@ -1,23 +1,13 @@
 const fs = require('fs/promises');
 const path = require('path');
-const nodemailer = require('nodemailer');
+const { deliver } = require('../config/mailer');
 
-// Provider-agnostic mailer: swap SMTP for SES/Resend/SendGrid by replacing
-// `deliver` only. Everything else calls sendEmail({ to, subject, template,
-// variables }) and never touches a provider SDK.
-function transport() {
-  if (!process.env.SMTP_HOST) return null;
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD } : undefined,
-  });
-}
+// Provider-agnostic mailer. The SMTP server itself is configured in
+// Administration > Mail and lives in the database, so nothing here reads
+// SMTP_* from the environment; config/mailer.js owns the pooled transport.
 
 const brand = '#1d4ed8';
 const appUrl = () => (process.env.APP_URL || 'http://localhost:5173').replace(/\/$/, '');
-const from = () => `"${process.env.MAIL_FROM_NAME || 'Yanisa Sign'}" <${process.env.MAIL_FROM_EMAIL || 'tech@yanisa.in'}>`;
 
 const layout = (title, body) => `<div style="font-family:Arial,Helvetica,sans-serif;max-width:600px;margin:auto;color:#172033">
   <p style="color:${brand};font-weight:700;letter-spacing:.14em;font-size:12px">YANISA SIGN</p>
@@ -32,9 +22,9 @@ const TEMPLATES = {
     subject: `You have been invited to Yanisa Sign`,
     html: layout('You have been invited to Yanisa Sign', `<p>Hello ${v.firstName},</p>
       <p>${v.invitedByName} invited you to join <b>${v.companyName}</b> on Yanisa Sign as <b>${v.roleName}</b>.</p>
-      <p>Use this verification code to confirm your email address and set a password:</p>${codeBlock(v.otp)}
-      ${button(`${appUrl()}/accept-invite?email=${encodeURIComponent(v.email)}`, 'Activate your account')}
-      <p style="color:#64748b;font-size:13px">This code expires in ${v.expiresInMinutes} minutes.</p>`),
+      <p>Follow this link to confirm your email address and choose a password:</p>
+      ${button(v.inviteUrl, 'Activate your account')}
+      <p style="color:#64748b;font-size:13px">The link works once and expires in ${v.expiresInDays} day${v.expiresInDays === 1 ? '' : 's'}. If you were not expecting this, you can ignore this email.</p>`),
   }),
   email_verification_otp: v => ({
     subject: 'Yanisa Sign Verification Code',
@@ -111,20 +101,23 @@ async function writeDevOutbox(entry) {
 /**
  * @param {{to:string, template:keyof TEMPLATES, variables?:object, subject?:string, cc?:string[], bcc?:string[], attachments?:object[]}} message
  */
-async function sendEmail({ to, template, variables = {}, subject, cc, bcc, attachments }) {
+async function sendEmail({ to, template, variables = {}, subject, cc, bcc, attachments, context = {} }) {
   const builder = TEMPLATES[template];
   if (!builder) throw new Error(`Unknown email template: ${template}`);
   const rendered = builder(variables);
-  const payload = { from: from(), to, cc, bcc, subject: subject || rendered.subject, html: rendered.html, attachments };
-  const client = transport();
-  if (!client) {
-    if (process.env.NODE_ENV === 'production') throw new Error('SMTP is not configured');
-    console.log(`[mail:dev] ${template} -> ${to} :: ${payload.subject}${variables.otp ? ` (code ${variables.otp})` : ''}`);
-    await writeDevOutbox({ to, template, subject: payload.subject, variables });
-    return { delivered: false, devOutbox: true };
-  }
-  await client.sendMail(payload);
-  return { delivered: true };
+  const line = { to, cc, bcc, subject: subject || rendered.subject, html: rendered.html, attachments };
+  // deliver() writes the Administration > Email log row and decides between
+  // sending, the development outbox and failing loudly in production.
+  return deliver(line, {
+    template,
+    companyId: context.companyId,
+    documentId: context.documentId,
+    actorUserId: context.actorUserId,
+    devOutbox: async () => {
+      console.log(`[mail:dev] ${template} -> ${to} :: ${line.subject}${variables.otp ? ` (code ${variables.otp})` : ''}`);
+      await writeDevOutbox({ to, template, subject: line.subject, variables });
+    },
+  });
 }
 
-module.exports = { sendEmail, TEMPLATES, transport };
+module.exports = { sendEmail, TEMPLATES, writeDevOutbox };
