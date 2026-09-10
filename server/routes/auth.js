@@ -34,6 +34,29 @@ const LOCK_MINUTES = Number(process.env.LOGIN_LOCK_MINUTES || 15);
 const RESET_TOKEN_MINUTES = 15;
 const GENERIC_OTP_REPLY = 'If an account exists for this email, a verification code has been sent.';
 
+/**
+ * Accounts that sign in on the password alone, with no emailed code.
+ *
+ * This exists for one situation: the bootstrap administrator whose address is
+ * not a real mailbox. A second factor delivered by email is a lockout for an
+ * account that cannot receive email, and the person locked out is the only one
+ * who could configure the mail server to fix it.
+ *
+ * Deliberately environment-only. It is not in Administration, and not in the
+ * database, so weakening sign-in takes a deploy and shows up in the
+ * environment rather than being a checkbox someone can tick. Remove the
+ * address from MFA_BYPASS_EMAILS as soon as the account has a working mailbox.
+ */
+const MFA_BYPASS = new Set(
+  String(process.env.MFA_BYPASS_EMAILS || '')
+    .split(',')
+    .map(entry => entry.trim().toLowerCase())
+    .filter(Boolean),
+);
+if (MFA_BYPASS.size) {
+  console.warn(`[auth] SECOND FACTOR DISABLED for ${MFA_BYPASS.size} account(s): ${[...MFA_BYPASS].join(', ')}. These sign in with a password alone - clear MFA_BYPASS_EMAILS once they can receive email.`);
+}
+
 // Per-IP throttles. They sit in front of the per-account lockout, which is the
 // real defence; keep them loose enough that a shared office address is not
 // locked out by a colleague's typo.
@@ -151,6 +174,18 @@ router.post('/login', loginLimiter, validate(z.object({ email: emailField, passw
     // its own attempt limit, not another chance to guess the password.
     user.failedLoginCount = 0; user.lockedUntil = undefined;
     await user.save();
+
+    // Exempt accounts finish here, on the password alone. Audited every time,
+    // so a bypass that outlives its reason is visible in the audit log rather
+    // than silent.
+    if (MFA_BYPASS.has(email)) {
+      user.lastLoginAt = new Date(); user.lastLoginIp = req.ip; user.lastActivityAt = new Date();
+      await user.save();
+      const { accessToken, session } = await startSession(req, res, user, { rememberMe });
+      await recordAttempt(req, { email, userId: user._id, companyId: user.companyId, success: true, reason: 'mfa_bypass' });
+      await logAuditEvent({ req, actor: user, action: 'authentication.login', entityType: 'authentication', entityId: user._id, description: `${user.firstName} signed in without a second factor (MFA_BYPASS_EMAILS)`, metadata: { sessionId: String(session._id), method: 'password_only', mfaBypass: true, browser: session.browser, os: session.os } });
+      return res.json({ accessToken, expiresIn: ACCESS_TOKEN_TTL, user: await publicUser(user) });
+    }
 
     // Second factor. No session and no token yet: those are handed out by
     // /login/verify-otp once the emailed code comes back.

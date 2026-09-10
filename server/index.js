@@ -1,11 +1,16 @@
+const path = require('path');
+// Loaded before anything else is required. Route and service modules read
+// settings like rate limits and token lifetimes at module load, so a .env
+// parsed after those requires would silently leave every one of them on its
+// default. (Container environments set these directly and were unaffected.)
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
-const dotenv = require('dotenv');
 const mongoose = require('mongoose');
-const path = require('path');
 const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const multer = require('multer');
@@ -15,8 +20,6 @@ const adminRoutes = require('./routes/admin');
 const { initStorage } = require('./services/storage');
 const { bootstrap } = require('./services/bootstrap');
 const { warmMailer } = require('./config/mailer');
-
-dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
 const app = express();
 const PORT = process.env.PORT || 5000;
