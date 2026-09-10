@@ -14,6 +14,13 @@ const ActivityLog = require('../models/ActivityLog');
 const { authenticate } = require('../middleware/auth');
 const { logAuditEvent } = require('../services/audit');
 const { issueOtp, verifyOtp, maskEmail, OTP_TTL_MINUTES, OTP_RESEND_SECONDS } = require('../services/otp');
+const OtpSecret = require('../models/OtpSecret');
+const { otpRateLimiter } = require('../middleware/otpRateLimiter');
+const { sendOTP } = require('../utils/sendOTP');
+const {
+  deriveSecret, generateOtp, verifyOtp: verifyLoginOtp, issuedAtFrom,
+  normaliseEmail, maskEmail: maskLoginEmail, OTP_TTL_SECONDS, OTP_TTL_MINUTES: LOGIN_OTP_TTL_MINUTES,
+} = require('../utils/otp');
 const { sendEmail } = require('../services/email');
 const {
   sha256, randomToken, signAccessToken, setRefreshCookie, clearRefreshCookie,
@@ -84,6 +91,28 @@ async function startSession(req, res, user, { rememberMe = true } = {}) {
 const recordAttempt = (req, { email, userId, companyId, success, reason }) =>
   LoginAttempt.create({ email, userId, companyId, success, reason, ipAddress: req.ip, userAgent: req.get('user-agent') }).catch(() => {});
 
+// Issues (or reuses) a login code for one address and mails it.
+//
+// A code still inside its resend cooldown is reused rather than replaced: the
+// OTP is derived deterministically from the stored secret and issue time, so
+// it can be regenerated for a second email without invalidating the first.
+// That stops a repeated sign-in from flooding a mailbox, and means the code a
+// user is already looking at keeps working.
+async function issueLoginOtp(email, scope) {
+  const now = new Date();
+  const existing = await OtpSecret.findOne({ email, scope });
+  if (existing && existing.expiresAt > now && now - issuedAtFrom(existing.expiresAt) < OTP_RESEND_SECONDS * 1000) {
+    const issuedAt = issuedAtFrom(existing.expiresAt);
+    return { otp: await generateOtp(existing.secret, issuedAt), reused: true };
+  }
+  const issuedAt = now;
+  const expiresAt = new Date(issuedAt.getTime() + OTP_TTL_SECONDS * 1000);
+  const secret = deriveSecret(email);
+  const otp = await generateOtp(secret, issuedAt);
+  await OtpSecret.findOneAndUpdate({ email }, { email, secret, scope, expiresAt }, { upsert: true, new: true, setDefaultsOnInsert: true });
+  return { otp, reused: false };
+}
+
 // ---------------------------------------------------------------- login
 
 router.post('/login', loginLimiter, validate(z.object({ email: emailField, password: passwordField, rememberMe: z.boolean().optional() })), async (req, res, next) => {
@@ -117,14 +146,19 @@ router.post('/login', loginLimiter, validate(z.object({ email: emailField, passw
       return res.status(403).json({ error: 'This account is not active. Contact your administrator.' });
     }
 
+    // The password was right, so the lockout counter resets here even though
+    // the sign-in is not finished - the second factor is a separate gate with
+    // its own attempt limit, not another chance to guess the password.
     user.failedLoginCount = 0; user.lockedUntil = undefined;
-    user.lastLoginAt = new Date(); user.lastLoginIp = req.ip; user.lastActivityAt = new Date();
     await user.save();
 
-    const { accessToken, session } = await startSession(req, res, user, { rememberMe });
-    await recordAttempt(req, { email, userId: user._id, companyId: user.companyId, success: true });
-    await logAuditEvent({ req, actor: user, action: 'authentication.login', entityType: 'authentication', entityId: user._id, description: `${user.firstName} signed in`, metadata: { sessionId: String(session._id), browser: session.browser, os: session.os } });
-    return res.json({ accessToken, expiresIn: ACCESS_TOKEN_TTL, user: await publicUser(user) });
+    // Second factor. No session and no token yet: those are handed out by
+    // /login/verify-otp once the emailed code comes back.
+    const { otp } = await issueLoginOtp(email, 'login_mfa');
+    sendOTP(email, otp, LOGIN_OTP_TTL_MINUTES).catch(err => console.error('[otp] send failed:', err.message));
+    await recordAttempt(req, { email, userId: user._id, companyId: user.companyId, success: false, reason: 'mfa_pending' });
+    await logAuditEvent({ req, actor: user, action: 'authentication.mfa_challenged', entityType: 'authentication', entityId: user._id, description: `${user.firstName} was sent a sign-in code`, metadata: { email } });
+    return res.json({ mfaRequired: true, email, maskedEmail: maskLoginEmail(email), expiresInMinutes: LOGIN_OTP_TTL_MINUTES, resendAfterSeconds: OTP_RESEND_SECONDS });
   } catch (err) { return next(err); }
 });
 
@@ -426,6 +460,139 @@ router.get('/activity', authenticate, async (req, res, next) => {
     const limit = Math.min(Number(req.query.limit) || 25, 100);
     const events = await ActivityLog.find({ companyId: req.user.companyId, actorUserId: req.user._id }).sort({ createdAt: -1 }).limit(limit).lean();
     return res.json(events);
+  } catch (err) { return next(err); }
+});
+
+// ------------------------------------------------- email one-time sign-in
+
+// Always the same answer whether or not the address belongs to an account, so
+// this endpoint cannot be used to discover who has one.
+const OTP_SENT_REPLY = { message: 'OTP sent' };
+
+/**
+ * POST /api/auth/otp/request
+ * Mails a six-digit code that is valid for five minutes.
+ */
+router.post('/otp/request', otpRateLimiter, async (req, res, next) => {
+  // express-validator is not a dependency of this project, so the body is
+  // checked with plain guards rather than pulling one in for two fields.
+  const email = normaliseEmail(req.body && req.body.email);
+  if (!email) return res.status(400).json({ error: 'Email is required.' });
+  if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
+
+  try {
+    const user = await User.findOne({ email, deletedAt: null });
+    // Unknown or inactive accounts get the generic reply with no mail sent.
+    if (!user || user.status !== 'active') return res.json(OTP_SENT_REPLY);
+
+    const issuedAt = new Date();
+    const expiresAt = new Date(issuedAt.getTime() + OTP_TTL_SECONDS * 1000);
+    const secret = deriveSecret(email);
+    const otp = await generateOtp(secret, issuedAt);
+
+    // Upsert on the unique email index: requesting a second code replaces the
+    // first, so only the newest code in a mailbox can ever be redeemed.
+    await OtpSecret.findOneAndUpdate(
+      { email },
+      { email, secret, expiresAt, scope: 'passwordless' },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    // Fire and forget. SMTP round trips take hundreds of milliseconds and the
+    // caller has no use for the result, so the response is sent now and the
+    // send settles on its own; the .catch is what keeps a failed send from
+    // becoming an unhandled rejection.
+    sendOTP(email, otp, LOGIN_OTP_TTL_MINUTES).catch(err => console.error('[otp] send failed:', err.message));
+
+    return res.json({ ...OTP_SENT_REPLY, maskedEmail: maskLoginEmail(email), expiresInMinutes: LOGIN_OTP_TTL_MINUTES });
+  } catch (err) { return next(err); }
+});
+
+/**
+ * POST /api/auth/otp/verify
+ * Exchanges a correct code for a signed access token and a session.
+ */
+router.post('/otp/verify', otpVerifyLimiter, async (req, res, next) => {
+  const email = normaliseEmail(req.body && req.body.email);
+  const otp = String((req.body && req.body.otp) || '').trim();
+  const rememberMe = req.body && req.body.rememberMe !== undefined ? Boolean(req.body.rememberMe) : true;
+  if (!email || !otp) return res.status(400).json({ error: 'Email and code are required.' });
+  if (!/^\d{6}$/.test(otp)) return res.status(400).json({ error: 'Enter the 6-digit code.' });
+
+  const rejected = () => res.status(401).json({ error: 'That code is not valid. Request a new one.' });
+
+  try {
+    const record = await OtpSecret.findOne({ email, scope: 'passwordless' });
+    if (!record) return rejected();
+
+    // Belt and braces alongside the TTL index: Mongo's expiry monitor only
+    // sweeps about once a minute, so a just-expired document can still be
+    // here. Checking the timestamp keeps five minutes meaning five minutes.
+    if (record.expiresAt <= new Date()) {
+      await OtpSecret.deleteOne({ _id: record._id });
+      return res.status(401).json({ error: 'That code has expired. Request a new one.' });
+    }
+
+    const issuedAt = issuedAtFrom(record.expiresAt);
+    if (!(await verifyLoginOtp(record.secret, otp, issuedAt))) {
+      await recordAttempt(req, { email, success: false, reason: 'bad_otp' });
+      return rejected();
+    }
+
+    // One-time use: the secret is destroyed before the token is issued, so a
+    // replay of the same code finds nothing to verify against.
+    await OtpSecret.deleteOne({ _id: record._id });
+
+    const user = await User.findOne({ email, deletedAt: null });
+    if (!user || user.status !== 'active') return res.status(403).json({ error: 'This account is not active. Contact your administrator.' });
+
+    user.failedLoginCount = 0; user.lockedUntil = undefined;
+    user.lastLoginAt = new Date(); user.lastLoginIp = req.ip; user.lastActivityAt = new Date();
+    await user.save();
+
+    // startSession is what makes the JWT usable: authenticate() re-checks the
+    // session id in the payload on every request, so a bare jwt.sign here
+    // would produce a token the rest of the API rejects.
+    const { accessToken, session } = await startSession(req, res, user, { rememberMe });
+    await recordAttempt(req, { email, userId: user._id, companyId: user.companyId, success: true, reason: 'otp' });
+    await logAuditEvent({ req, actor: user, action: 'authentication.login', entityType: 'authentication', entityId: user._id, description: `${user.firstName} signed in with an email code`, metadata: { sessionId: String(session._id), method: 'otp', browser: session.browser, os: session.os } });
+
+    return res.json({ accessToken, expiresIn: ACCESS_TOKEN_TTL, user: await publicUser(user) });
+  } catch (err) { return next(err); }
+});
+
+/**
+ * POST /api/auth/login/verify-otp
+ * Second half of the sign-in: exchanges the emailed code for a session.
+ */
+router.post('/login/verify-otp', otpVerifyLimiter, validate(z.object({ email: emailField, otp: otpField, rememberMe: z.boolean().optional() })), async (req, res, next) => {
+  const { email, otp, rememberMe = true } = req.body;
+  try {
+    // Scoped to login_mfa, so a code obtained from the passwordless endpoint
+    // cannot be used to finish a sign-in that skipped the password.
+    const record = await OtpSecret.findOne({ email, scope: 'login_mfa' });
+    if (!record) return res.status(401).json({ error: 'That code is not valid. Start again from the sign-in page.', code: 'restart_login' });
+    if (record.expiresAt <= new Date()) {
+      await OtpSecret.deleteOne({ _id: record._id });
+      return res.status(401).json({ error: 'That code has expired. Sign in again to get a new one.', code: 'restart_login' });
+    }
+    if (!(await verifyLoginOtp(record.secret, otp, issuedAtFrom(record.expiresAt)))) {
+      await recordAttempt(req, { email, success: false, reason: 'bad_mfa_code' });
+      return res.status(401).json({ error: 'That code is not correct. Check the email and try again.' });
+    }
+    await OtpSecret.deleteOne({ _id: record._id });
+
+    // Re-read the account: it could have been suspended between the password
+    // step and the code arriving.
+    const user = await User.findOne({ email, deletedAt: null });
+    if (!user || user.status !== 'active') return res.status(403).json({ error: 'This account is not active. Contact your administrator.' });
+
+    user.lastLoginAt = new Date(); user.lastLoginIp = req.ip; user.lastActivityAt = new Date();
+    await user.save();
+    const { accessToken, session } = await startSession(req, res, user, { rememberMe });
+    await recordAttempt(req, { email, userId: user._id, companyId: user.companyId, success: true, reason: 'mfa' });
+    await logAuditEvent({ req, actor: user, action: 'authentication.login', entityType: 'authentication', entityId: user._id, description: `${user.firstName} signed in`, metadata: { sessionId: String(session._id), method: 'password+otp', browser: session.browser, os: session.os } });
+    return res.json({ accessToken, expiresIn: ACCESS_TOKEN_TTL, user: await publicUser(user) });
   } catch (err) { return next(err); }
 });
 

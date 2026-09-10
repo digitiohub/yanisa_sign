@@ -6,6 +6,12 @@ const signerSchema = new mongoose.Schema({
   phone: String,
   type: { type: String, enum: ['Candidate', 'Employee', 'HR', 'Manager', 'External Signer'], default: 'Candidate' },
   order: { type: Number, default: 1 },
+  // The person whose approval closes the document: they sign last, only once
+  // every other signer has completed, and they can review what the others
+  // signed before committing. At most one per document (enforced on save in
+  // routes/sign.js). With no other signers there is nothing to wait for, so a
+  // lone final approver simply signs normally.
+  isFinalApprover: { type: Boolean, default: false },
   status: { type: String, enum: ['pending', 'viewed', 'completed', 'declined'], default: 'pending' },
   completedAt: Date,
 }, { timestamps: true });

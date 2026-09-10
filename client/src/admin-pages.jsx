@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  Activity, ArrowLeft, ChevronDown, ChevronRight, FileText, Loader2, Lock, Mail, MoreVertical, Plus,
+  Activity, ArrowLeft, Check, ChevronDown, ChevronRight, FileText, Loader2, Lock, Mail, MoreVertical, Plus,
   RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Trash2, UserPlus, Users, X,
 } from 'lucide-react';
 import { api, errorText, formatDate, formatDateTime, initials, timeAgo } from './api';
@@ -18,6 +18,7 @@ function AdminFrame({ title, subtitle, actions, children }) {
     ['/admin/roles', 'Roles', ShieldCheck, 'roles.view'],
     ['/admin/activity', 'Activity', Activity, 'activity.view'],
     ['/admin/audit', 'Audit log', Lock, 'audit.view'],
+    ['/admin/mail', 'Mail', Mail, 'settings.view'],
   ].filter(([, , , permission]) => !permission || auth.can(permission));
   return <main className="mx-auto max-w-[1500px] p-5 lg:p-8">
     <div className="flex flex-wrap items-end justify-between gap-4">
@@ -576,5 +577,123 @@ export function RolesPage() {
         </div>
       </div>
     </div>}
+  </AdminFrame>;
+}
+
+/**
+ * Outgoing mail configuration. The password is write-only: the API never
+ * returns it, so the field shows whether one is stored and replaces it when
+ * something new is typed, rather than pretending to display the current value.
+ */
+export function MailSettingsPage() {
+  const auth = useAuth();
+  const canEdit = auth.can('settings.edit');
+  const [form, setForm] = useState(null);
+  const [password, setPassword] = useState('');
+  const [testTo, setTestTo] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const load = useCallback(() => {
+    api.get('/admin/mail-settings')
+      .then(({ data }) => { setForm(data); setTestTo(current => current || auth.user?.email || ''); })
+      .catch(failure => setError(errorText(failure)));
+  }, [auth.user]);
+  useEffect(load, [load]);
+
+  const set = (key, value) => setForm(current => ({ ...current, [key]: value }));
+
+  const save = async () => {
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const body = {
+        enabled: form.enabled, host: form.host.trim(), port: Number(form.port) || 587, secure: form.secure,
+        username: form.username.trim(), fromName: form.fromName.trim(), fromEmail: form.fromEmail.trim(),
+      };
+      // Only sent when the administrator actually typed one, so saving other
+      // fields cannot wipe a stored password.
+      if (password) body.password = password;
+      const { data } = await api.put('/admin/mail-settings', body);
+      setForm(data); setPassword(''); setNotice('Mail settings saved.');
+    } catch (failure) { setError(errorText(failure)); }
+    finally { setBusy(false); }
+  };
+
+  const sendTest = async () => {
+    setTesting(true); setError(''); setNotice('');
+    try {
+      const { data } = await api.post('/admin/mail-settings/test', { to: testTo.trim() || undefined });
+      setNotice(data.message); load();
+    } catch (failure) { setError(errorText(failure)); load(); }
+    finally { setTesting(false); }
+  };
+
+  if (!form) return <AdminFrame title="Mail"><div className="loading"><Loader2 className="animate-spin" /></div></AdminFrame>;
+
+  return <AdminFrame title="Mail" subtitle="The SMTP server used for sign-in codes, invitations and signature requests.">
+    {error && <div className="error-box">{error}</div>}
+    {notice && <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">{notice}</div>}
+
+    <div className="mt-6 grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+      <div className="card">
+        <h2 className="card-title">SMTP server</h2>
+        <label className="checkbox-label mt-4">
+          <input type="checkbox" disabled={!canEdit} checked={form.enabled} onChange={event => set('enabled', event.target.checked)} />
+          Send email through this server
+        </label>
+        <p className="mt-1 text-xs text-slate-500">While this is off, codes are written to the server log instead of being sent.</p>
+
+        <div className="grid gap-x-4 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          <label className="field-label">Host<input disabled={!canEdit} value={form.host} placeholder="smtp.resend.com" onChange={event => set('host', event.target.value)} /></label>
+          <label className="field-label">Port<input disabled={!canEdit} type="number" value={form.port} onChange={event => set('port', event.target.value)} /></label>
+        </div>
+        <label className="checkbox-label mt-3">
+          <input type="checkbox" disabled={!canEdit} checked={form.secure} onChange={event => set('secure', event.target.checked)} />
+          Use implicit TLS (port 465 only)
+        </label>
+        <div className="grid gap-x-4 sm:grid-cols-2">
+          <label className="field-label">Username<input disabled={!canEdit} value={form.username} placeholder="resend" autoComplete="off" onChange={event => set('username', event.target.value)} /></label>
+          <label className="field-label">Password
+            <input
+              disabled={!canEdit}
+              type="password"
+              value={password}
+              autoComplete="new-password"
+              placeholder={form.hasPassword ? 'Stored - type to replace' : 'API key or password'}
+              onChange={event => setPassword(event.target.value)}
+            />
+          </label>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">Encrypted before it is stored and never sent back to this page.</p>
+
+        <h2 className="card-title mt-7">Sender</h2>
+        <div className="grid gap-x-4 sm:grid-cols-2">
+          <label className="field-label">From name<input disabled={!canEdit} value={form.fromName} onChange={event => set('fromName', event.target.value)} /></label>
+          <label className="field-label">From address<input disabled={!canEdit} type="email" value={form.fromEmail} placeholder="no-reply@example.com" onChange={event => set('fromEmail', event.target.value)} /></label>
+        </div>
+
+        {canEdit && <button className="primary-button mt-6" disabled={busy} onClick={save}>{busy && <Loader2 className="animate-spin" size={17} />}Save settings</button>}
+        {!canEdit && <p className="mt-6 text-sm text-slate-500">You can view these settings but not change them.</p>}
+      </div>
+
+      <div className="card self-start">
+        <h2 className="card-title">Send a test</h2>
+        <p className="mt-2 text-sm text-slate-500">Connects with the saved settings and sends one real message, so this proves what is stored rather than what is on screen.</p>
+        <label className="field-label">To<input disabled={!canEdit} type="email" value={testTo} onChange={event => setTestTo(event.target.value)} /></label>
+        {canEdit && <button className="secondary-button mt-4 w-full" disabled={testing} onClick={sendTest}>{testing ? <Loader2 className="animate-spin" size={17} /> : <Send size={16} />}Send test email</button>}
+
+        <div className="mt-5 border-t border-slate-200 pt-4 text-sm">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Last test</p>
+          {form.lastTestedAt
+            ? <p className={`mt-2 flex items-start gap-2 ${form.lastTestOk ? 'text-emerald-700' : 'text-red-700'}`}>
+              {form.lastTestOk ? <Check size={16} className="mt-0.5 shrink-0" /> : <ShieldAlert size={16} className="mt-0.5 shrink-0" />}
+              <span>{form.lastTestOk ? 'Delivered' : form.lastTestError}<br /><span className="text-slate-400">{formatDateTime(form.lastTestedAt)}</span></span>
+            </p>
+            : <p className="mt-2 text-slate-400">Never tested.</p>}
+        </div>
+      </div>
+    </div>
   </AdminFrame>;
 }

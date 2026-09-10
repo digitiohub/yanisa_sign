@@ -3,8 +3,10 @@ const Workspace = require('../models/Workspace');
 const Role = require('../models/Role');
 const User = require('../models/User');
 const SignDocument = require('../models/SignDocument');
+const MailSetting = require('../models/MailSetting');
 const { SYSTEM_ROLES } = require('../config/permissions');
 const { hashPassword } = require('./tokens');
+const { encryptSecret } = require('../utils/secretBox');
 
 const slugify = value => String(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'company';
 
@@ -35,6 +37,8 @@ async function bootstrap() {
     { $setOnInsert: { companyId: company._id, name: 'General', isDefault: true, description: 'Default workspace' } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
+
+  await seedMailSettings();
 
   const adminEmail = String(process.env.ADMIN_EMAIL || '').toLowerCase().trim();
   const adminPassword = process.env.ADMIN_PASSWORD;
@@ -69,6 +73,33 @@ async function bootstrap() {
   }
 
   return { company, workspace, admin };
+}
+
+/**
+ * One-time migration of SMTP config out of the environment.
+ *
+ * Mail settings are database-backed now, so SMTP_* is only ever read here, on
+ * the first boot after upgrading, to carry an existing deployment across
+ * without an operator having to retype it. Once the row exists the environment
+ * is ignored entirely and Administration > Mail is the only source of truth.
+ */
+async function seedMailSettings() {
+  if (await MailSetting.exists({ key: 'global' })) return;
+  const host = String(process.env.SMTP_HOST || '').trim();
+  await MailSetting.create({
+    key: 'global',
+    // Adopting an existing SMTP_HOST turns mail on; a fresh install starts off
+    // and waits to be configured from Administration.
+    enabled: Boolean(host),
+    host,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: process.env.SMTP_SECURE === 'true',
+    username: String(process.env.SMTP_USER || '').trim(),
+    passwordEncrypted: process.env.SMTP_PASSWORD ? encryptSecret(process.env.SMTP_PASSWORD) : '',
+    fromName: process.env.MAIL_FROM_NAME || 'Yanisa Sign',
+    fromEmail: String(process.env.MAIL_FROM_EMAIL || '').toLowerCase().trim(),
+  });
+  console.log(host ? `Mail settings adopted from the environment (${host})` : 'Mail settings created - configure them in Administration > Mail');
 }
 
 module.exports = { bootstrap, slugify };
