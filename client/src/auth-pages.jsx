@@ -221,10 +221,13 @@ export function ForgotPasswordPage() {
 export function AcceptInvitePage() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const [step, setStep] = useState('otp');
+  // A ?token= link goes straight to choosing a password. The code-based path
+  // is kept for invitations that were sent before links replaced them.
+  const linkToken = params.get('token') || '';
+  const [step, setStep] = useState(linkToken ? 'password' : 'otp');
   const [email, setEmail] = useState(params.get('email') || '');
   const [otp, setOtp] = useState('');
-  const [invitationToken, setInvitationToken] = useState('');
+  const [invitationToken, setInvitationToken] = useState(linkToken);
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [error, setError] = useState('');

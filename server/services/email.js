@@ -22,9 +22,9 @@ const TEMPLATES = {
     subject: `You have been invited to Yanisa Sign`,
     html: layout('You have been invited to Yanisa Sign', `<p>Hello ${v.firstName},</p>
       <p>${v.invitedByName} invited you to join <b>${v.companyName}</b> on Yanisa Sign as <b>${v.roleName}</b>.</p>
-      <p>Use this verification code to confirm your email address and set a password:</p>${codeBlock(v.otp)}
-      ${button(`${appUrl()}/accept-invite?email=${encodeURIComponent(v.email)}`, 'Activate your account')}
-      <p style="color:#64748b;font-size:13px">This code expires in ${v.expiresInMinutes} minutes.</p>`),
+      <p>Follow this link to confirm your email address and choose a password:</p>
+      ${button(v.inviteUrl, 'Activate your account')}
+      <p style="color:#64748b;font-size:13px">The link works once and expires in ${v.expiresInDays} day${v.expiresInDays === 1 ? '' : 's'}. If you were not expecting this, you can ignore this email.</p>`),
   }),
   email_verification_otp: v => ({
     subject: 'Yanisa Sign Verification Code',

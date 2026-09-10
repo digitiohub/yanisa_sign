@@ -22,11 +22,30 @@ const normaliseEmail = email => String(email || '').trim().toLowerCase();
  *   - the nonce rotates the secret on every request, so asking for a new code
  *     immediately invalidates the previous one even within the same time step.
  */
+let warnedAboutFallback = false;
+
+/**
+ * The master key the per-code secrets are derived from.
+ *
+ * OTP_SECRET is preferred, but falling back to a value derived from
+ * JWT_SECRET matters more than the purity: this key sits on the sign-in path,
+ * so treating it as mandatory means any deployment that has not added the
+ * variable yet cannot log anyone in at all. Derived rather than used directly,
+ * so the session signing key is never also the OTP key.
+ */
+function otpMasterKey() {
+  if (process.env.OTP_SECRET) return process.env.OTP_SECRET;
+  if (!process.env.JWT_SECRET) throw new Error('Set OTP_SECRET (or JWT_SECRET) before issuing sign-in codes.');
+  if (!warnedAboutFallback) {
+    warnedAboutFallback = true;
+    console.warn('[otp] OTP_SECRET is not set - deriving the code key from JWT_SECRET. Set OTP_SECRET so rotating JWT_SECRET does not invalidate codes in flight.');
+  }
+  return crypto.createHash('sha256').update(`yanisa-otp-v1:${process.env.JWT_SECRET}`).digest();
+}
+
 function deriveSecret(email) {
-  const key = process.env.OTP_SECRET;
-  if (!key) throw new Error('OTP_SECRET is not set');
   const nonce = crypto.randomBytes(16).toString('hex');
-  return crypto.createHmac('sha256', key).update(`${normaliseEmail(email)}:${nonce}`).digest('hex');
+  return crypto.createHmac('sha256', otpMasterKey()).update(`${normaliseEmail(email)}:${nonce}`).digest('hex');
 }
 
 /**

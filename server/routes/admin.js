@@ -9,11 +9,13 @@ const ActivityLog = require('../models/ActivityLog');
 const LoginAttempt = require('../models/LoginAttempt');
 const SignDocument = require('../models/SignDocument');
 const Company = require('../models/Company');
+const ActionToken = require('../models/ActionToken');
 const MailSetting = require('../models/MailSetting');
 const EmailLog = require('../models/EmailLog');
 const { authenticate, permit } = require('../middleware/auth');
 const { logAuditEvent } = require('../services/audit');
 const { issueOtp } = require('../services/otp');
+const { sha256, randomToken } = require('../services/tokens');
 const { sendEmail } = require('../services/email');
 const { buildTransport, invalidateMailer, loadSetting, fromHeader } = require('../config/mailer');
 const { encryptSecret, decryptSecret } = require('../utils/secretBox');
@@ -29,6 +31,25 @@ const validate = schema => (req, res, next) => {
   return next();
 };
 const objectId = z.string().regex(/^[a-f0-9]{24}$/i, 'Invalid id');
+
+// Invitations are a one-time link, not a code. A new account has no second
+// factor to fall back on, so possession of the mailbox is the whole proof -
+// and a link the recipient clicks is both easier and no weaker than asking
+// them to copy six digits out of the same email. One-time codes are for
+// signing in, where a password has already been checked.
+const INVITE_TOKEN_DAYS = Number(process.env.INVITE_TOKEN_DAYS || 7);
+async function createInvitationLink(user, req) {
+  // Any earlier unused invitation is retired so only the newest link works.
+  await ActionToken.updateMany({ userId: user._id, purpose: 'invitation', usedAt: null }, { usedAt: new Date() });
+  const token = randomToken();
+  await ActionToken.create({
+    userId: user._id, companyId: user.companyId, purpose: 'invitation',
+    tokenHash: sha256(token), createdByIp: req.ip,
+    expiresAt: new Date(Date.now() + INVITE_TOKEN_DAYS * 86400000),
+  });
+  const base = (process.env.APP_URL || 'http://localhost:5173').replace(/\/$/, '');
+  return `${base}/accept-invite?token=${token}`;
+}
 
 /** Every admin query is scoped to the company on the session, never the body. */
 const scope = req => ({ companyId: req.user.companyId });
@@ -119,10 +140,12 @@ router.post('/users', permit('users.create'), validate(z.object({
     });
 
     const company = await Company.findById(req.user.companyId).lean();
-    const issued = await issueOtp({ user, email: user.email, purpose: 'email_verification', ip: req.ip });
-    if (issued.otp) {
-      await sendEmail({ to: user.email, template: 'user_invitation', variables: { firstName: user.firstName, email: user.email, otp: issued.otp, expiresInMinutes: issued.expiresInMinutes, invitedByName: req.user.fullName, companyName: company?.name || 'Yanisa', roleName: role.name } });
-    }
+    const inviteUrl = await createInvitationLink(user, req);
+    await sendEmail({
+      to: user.email, template: 'user_invitation',
+      variables: { firstName: user.firstName, email: user.email, inviteUrl, expiresInDays: INVITE_TOKEN_DAYS, invitedByName: req.user.fullName, companyName: company?.name || 'Yanisa', roleName: role.name },
+      context: { companyId: user.companyId, actorUserId: req.user._id },
+    });
     await logAuditEvent({ req, action: 'user.created', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} invited ${user.email} as ${role.name}`, after: { email: user.email, role: role.key, status: user.status, workspaceId: user.workspaceId } });
     const [summary] = await decorate(req, [user.toObject()]);
     return res.status(201).json(summary);
@@ -245,9 +268,17 @@ router.post('/users/:id/reset-access', permit('users.edit'), async (req, res, ne
     user.lockedUntil = undefined;
     await user.save();
 
-    const purpose = user.status === 'invited' ? 'email_verification' : 'password_reset';
-    const issued = await issueOtp({ user, email: user.email, purpose, ip: req.ip, force: true });
-    if (issued.otp) await sendEmail({ to: user.email, template: 'access_reset', variables: { firstName: user.firstName, email: user.email, otp: issued.otp, expiresInMinutes: issued.expiresInMinutes } });
+    // Someone who never finished signing up has no password to reset, so they
+    // get their invitation link again rather than a reset code.
+    if (user.status === 'invited') {
+      const company = await Company.findById(req.user.companyId).lean();
+      const inviteUrl = await createInvitationLink(user, req);
+      await sendEmail({ to: user.email, template: 'user_invitation', variables: { firstName: user.firstName, email: user.email, inviteUrl, expiresInDays: INVITE_TOKEN_DAYS, invitedByName: req.user.fullName, companyName: company?.name || 'Yanisa', roleName: 'User' }, context: { companyId: user.companyId, actorUserId: req.user._id } });
+      await logAuditEvent({ req, action: 'user.access_reset', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} reset access for ${user.email}`, metadata: { sessionsRevoked: true, invitationResent: true } });
+      return res.json({ ok: true, message: `Sessions revoked and a new invitation link was sent to ${user.email}.` });
+    }
+    const issued = await issueOtp({ user, email: user.email, purpose: 'password_reset', ip: req.ip, force: true });
+    if (issued.otp) await sendEmail({ to: user.email, template: 'access_reset', variables: { firstName: user.firstName, email: user.email, otp: issued.otp, expiresInMinutes: issued.expiresInMinutes }, context: { companyId: user.companyId, actorUserId: req.user._id } });
     await logAuditEvent({ req, action: 'user.access_reset', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} reset access for ${user.email}`, metadata: { sessionsRevoked: true, codeSent: Boolean(issued.otp) } });
     return res.json({ ok: true, message: `Sessions revoked and a new code was sent to ${user.email}.` });
   } catch (err) { return next(err); }
@@ -258,10 +289,13 @@ router.post('/users/:id/resend-invitation', permit('users.create'), async (req, 
     const { user, role, error, status } = await loadManageableUser(req, req.params.id);
     if (error) return res.status(status).json({ error });
     if (user.status !== 'invited') return res.status(400).json({ error: 'That user has already accepted their invitation.' });
-    const issued = await issueOtp({ user, email: user.email, purpose: 'email_verification', ip: req.ip, force: true });
-    if (issued.error) return res.status(429).json({ error: issued.error });
     const company = await Company.findById(req.user.companyId).lean();
-    await sendEmail({ to: user.email, template: 'user_invitation', variables: { firstName: user.firstName, email: user.email, otp: issued.otp, expiresInMinutes: issued.expiresInMinutes, invitedByName: req.user.fullName, companyName: company?.name || 'Yanisa', roleName: role?.name || 'User' } });
+    const inviteUrl = await createInvitationLink(user, req);
+    await sendEmail({
+      to: user.email, template: 'user_invitation',
+      variables: { firstName: user.firstName, email: user.email, inviteUrl, expiresInDays: INVITE_TOKEN_DAYS, invitedByName: req.user.fullName, companyName: company?.name || 'Yanisa', roleName: role?.name || 'User' },
+      context: { companyId: user.companyId, actorUserId: req.user._id },
+    });
     await logAuditEvent({ req, action: 'user.invitation_resent', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} resent the invitation to ${user.email}` });
     return res.json({ ok: true });
   } catch (err) { return next(err); }

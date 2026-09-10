@@ -343,6 +343,9 @@ router.post('/accept-invite', validate(z.object({ invitationToken: z.string().mi
     const user = await User.findById(record.userId).select('+passwordHash +passwordHistory');
     if (!user || user.deletedAt) return res.status(400).json({ error: 'This invitation is no longer valid.' });
 
+    // applyNewPassword flips an invited account to active and marks the
+    // address verified - opening a link mailed to it is the same proof the
+    // old verification code gave.
     await applyNewPassword(user, req.body.password, { reason: 'invitation_accepted' });
     record.usedAt = new Date(); await record.save();
     const company = await Company.findById(user.companyId).lean();
