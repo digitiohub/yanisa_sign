@@ -30,6 +30,8 @@ export function refreshSession() {
 
 api.interceptors.response.use(response => response, async error => {
   const request = error.config;
+  // /auth/login and /auth/login/verify-otp both 401 on bad credentials; a
+  // refresh-and-retry there would mask the real error.
   const isAuthCall = request?.url?.startsWith('/auth/refresh') || request?.url?.startsWith('/auth/login');
   if (error.response?.status === 401 && request && !request.__retried && !isAuthCall) {
     request.__retried = true;

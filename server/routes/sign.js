@@ -25,6 +25,42 @@ const track = (req, doc, action, description, extra = {}) => logActivity({ req, 
 const guard = capability => requireDocument(SignDocument, capability);
 const ref = () => `SGN-${new Date().getUTCFullYear()}-${crypto.randomInt(0, 1000000).toString().padStart(6, '0')}`;
 
+// --- final approver -------------------------------------------------------
+// One signer can be marked as the final approver: the person whose signature
+// closes the document. They are held back until everyone else has completed,
+// and in exchange they get to see what the others actually signed.
+const finalApproverOf = doc => doc.signers.find(signer => signer.isFinalApprover);
+const otherSigners = (doc, signer) => doc.signers.filter(other => String(other._id) !== String(signer._id));
+const allOthersComplete = (doc, signer) => otherSigners(doc, signer).every(other => other.status === 'completed');
+
+/** True while a final approver still has someone to wait for. */
+const approverWaiting = (doc, signer) => Boolean(signer?.isFinalApprover) && !allOthersComplete(doc, signer);
+
+/** What the approver's screen shows: who is done and who is not. */
+const signerProgress = (doc, signer) => otherSigners(doc, signer).map(other => ({
+  id: other._id, name: other.name, email: other.email,
+  status: other.status, completedAt: other.completedAt || null,
+}));
+
+/**
+ * The other signers' completed values, so the approver can verify the
+ * signatures before adding their own. Only ever built for a final approver,
+ * and only from signers who have actually completed - a half-filled field
+ * belonging to someone still signing is nobody else's business.
+ */
+const witnessFields = (doc, signer) => {
+  const completed = new Set(doc.signers.filter(other => other.status === 'completed' && String(other._id) !== String(signer._id)).map(other => String(other._id)));
+  const nameOf = new Map(doc.signers.map(other => [String(other._id), other.name]));
+  return doc.fields
+    .filter(field => completed.has(String(field.signerId)) && field.value !== undefined && field.value !== null && field.value !== '')
+    .map(field => ({
+      _id: field._id, pageNumber: field.pageNumber, type: field.type,
+      x: field.x, y: field.y, width: field.width, height: field.height,
+      alignment: field.alignment || 'left', value: field.value,
+      signerName: nameOf.get(String(field.signerId)) || 'Signer',
+    }));
+};
+
 async function appendCompletionCertificate(pdf, doc, signingHash) {
   const font = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
@@ -161,6 +197,9 @@ router.put('/:id/design', authenticate, permit('documents.edit'), guard('canEdit
     const doc = req.document;
     if (!['Draft', 'Ready to Send'].includes(doc.status)) return res.status(409).json({ error: 'A sent document cannot be redesigned' });
     if (!Array.isArray(req.body.signers) || !Array.isArray(req.body.fields)) return res.status(400).json({ error: 'Signers and fields are required' });
+    // A document closes on exactly one signature, so two final approvers would
+    // deadlock: each would be waiting for the other to finish first.
+    if (req.body.signers.filter(signer => signer.isFinalApprover).length > 1) return res.status(400).json({ error: 'Only one signer can be the final approver.' });
     const previous = { signers: doc.signers.map(signer => signer.toObject()), fields: doc.fields.map(field => field.toObject()) };
     doc.signers = req.body.signers; doc.fields = req.body.fields;
     doc.status = doc.signers.length && doc.fields.length ? 'Ready to Send' : 'Draft';
@@ -184,7 +223,7 @@ router.post('/:id/send', authenticate, permit('documents.send'), guard('canSend'
     const emailPattern=/^[^\s@]+@[^\s@]+\.[^\s@]+$/; const normalizeEmails=value=>Array.isArray(value)?[...new Set(value.map(item=>String(item).trim().toLowerCase()).filter(Boolean))].slice(0,25):[]; const cc=normalizeEmails(req.body.cc),bcc=normalizeEmails(req.body.bcc); const invalid=[...cc,...bcc].find(email=>!emailPattern.test(email)); if(invalid)return res.status(400).json({error:`Invalid CC/BCC email: ${invalid}`});
     doc.subject = String(req.body.subject || `Signature Request – ${doc.title}`).slice(0, 200); doc.message = String(req.body.message || '').slice(0, 5000); doc.cc = cc; doc.bcc = bcc; doc.reminders = Boolean(req.body.reminders); doc.sentAt = new Date(); doc.status = 'Pending Signature';
     const links = [];
-    for (const signer of doc.signers) { const token = crypto.randomBytes(32).toString('base64url'); await SignAccess.create({ documentId: doc._id, signerId: signer._id, tokenHash: hash(token), expiresAt: doc.expiresAt }); const url = `${process.env.APP_URL || 'http://localhost:5173'}/sign/request/${token}`; await mail.sendSignatureRequest({ signer, document: doc, url }); links.push({ signer: signer.email, url: process.env.NODE_ENV === 'production' ? undefined : url }); }
+    for (const signer of doc.signers) { const token = crypto.randomBytes(32).toString('base64url'); await SignAccess.create({ documentId: doc._id, signerId: signer._id, tokenHash: hash(token), expiresAt: doc.expiresAt }); const url = `${process.env.APP_URL || 'http://localhost:5173'}/sign/request/${token}`; await mail.sendSignatureRequest({ signer, document: doc, url, waitingOnOthers: approverWaiting(doc, signer) }); links.push({ signer: signer.email, url: process.env.NODE_ENV === 'production' ? undefined : url }); }
     await mail.sendRequestObservers(doc);
     doc.audits.push(audit(req, 'request_sent', { recipients: doc.signers.map(s => s.email) })); doc.updatedBy = req.user._id; await doc.save();
     await track(req, doc, 'document.sent', `${req.user.fullName} sent "${doc.title}" to ${doc.signers.map(s => s.email).join(', ')}`, { metadata: { recipients: doc.signers.map(s => s.email), cc: doc.cc, expiresAt: doc.expiresAt } });
@@ -198,13 +237,35 @@ router.post('/:id/resend', authenticate, permit('documents.send'), guard('canSen
 router.get('/:id/audit', authenticate, permit('documents.view'), guard(), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id).select('referenceNumber title audits').lean(); res.json(doc); } catch (e) { next(e); } });
 
 async function accessFor(req, res) { const access = await SignAccess.findOne({ tokenHash: hash(req.params.token) }); if (!access) { res.status(404).json({ error: 'This signing link is invalid' }); return null; } const doc = await SignDocument.findById(access.documentId); if (!doc) { res.sendStatus(404); return null; } if (doc.status === 'Signed') { res.status(409).json({ error: 'This document has already been signed and completed' }); return null; } if (access.revokedAt || doc.status === 'Cancelled') { res.status(410).json({ error: 'This signing request has been cancelled' }); return null; } if (access.expiresAt < new Date()) { doc.status = 'Expired'; await doc.save(); res.status(410).json({ error: 'This signature request has expired' }); return null; } return { access, doc, signer: doc.signers.id(access.signerId) }; }
-router.get('/request/:token', async (req, res, next) => { try { const found = await accessFor(req, res); if (!found) return; const { access, doc, signer } = found; access.lastAccessedAt = new Date(); signer.status = signer.status === 'pending' ? 'viewed' : signer.status; if (doc.status === 'Pending Signature') doc.status = 'Viewed'; doc.audits.push(audit(req, 'document_viewed', {}, signer._id)); await Promise.all([access.save(), doc.save()]); await trackSigner(req, doc, signer, 'document.viewed_by_signer', `${signer.name} opened "${doc.title}"`); res.json({ document: { id: doc._id, title: doc.title, pageCount: doc.pageCount, status: doc.status }, signer, fields: doc.fields.filter(f => String(f.signerId) === String(signer._id)).map(f => ({ ...f.toObject(), value: undefined })) }); } catch (e) { next(e); } });
+router.get('/request/:token', async (req, res, next) => { try { const found = await accessFor(req, res); if (!found) return; const { access, doc, signer } = found; access.lastAccessedAt = new Date(); signer.status = signer.status === 'pending' ? 'viewed' : signer.status; if (doc.status === 'Pending Signature') doc.status = 'Viewed'; doc.audits.push(audit(req, 'document_viewed', {}, signer._id)); await Promise.all([access.save(), doc.save()]); await trackSigner(req, doc, signer, 'document.viewed_by_signer', `${signer.name} opened "${doc.title}"`); const waiting = approverWaiting(doc, signer);
+  res.json({
+    document: { id: doc._id, title: doc.title, pageCount: doc.pageCount, status: doc.status },
+    signer,
+    fields: doc.fields.filter(f => String(f.signerId) === String(signer._id)).map(f => ({ ...f.toObject(), value: undefined })),
+    // Only a final approver ever receives these. `waiting` is what the page
+    // uses to hold back the finish controls; the server re-checks it on
+    // submit, so a tampered client gains nothing.
+    isFinalApprover: Boolean(signer.isFinalApprover),
+    waiting,
+    others: signer.isFinalApprover ? signerProgress(doc, signer) : [],
+    witnessFields: signer.isFinalApprover ? witnessFields(doc, signer) : [],
+  }); } catch (e) { next(e); } });
 router.get('/request/:token/pdf', async (req, res, next) => { try { const found = await accessFor(req, res); if (!found) return; res.type('pdf').send(await fs.readFile(found.doc.originalFile)); } catch (e) { next(e); } });
 router.post('/request/:token/decline', async (req,res,next)=>{try{const found=await accessFor(req,res);if(!found)return;const reason=String(req.body.reason||'').trim().slice(0,1000);if(!reason)return res.status(400).json({error:'A decline reason is required'});found.signer.status='declined';found.doc.status='Declined';found.access.revokedAt=new Date();found.doc.audits.push(audit(req,'request_declined',{reason},found.signer._id));await Promise.all([found.access.save(),found.doc.save()]);await trackSigner(req,found.doc,found.signer,'document.declined',`${found.signer.name} declined "${found.doc.title}"`,{reason});res.json({ok:true})}catch(e){next(e)}});
 
 router.post('/request/:token/complete', async (req, res, next) => {
   try {
-    const found = await accessFor(req, res); if (!found) return; const { access, doc, signer } = found; if (!req.body.consent) return res.status(400).json({ error: 'Electronic signature consent is required' });
+    const found = await accessFor(req, res); if (!found) return; const { access, doc, signer } = found;
+    // The gate that makes a final approver final. Enforced here rather than in
+    // the UI alone, because the signing link is public.
+    if (approverWaiting(doc, signer)) {
+      const outstanding = otherSigners(doc, signer).filter(other => other.status !== 'completed');
+      return res.status(409).json({
+        error: `You sign last on this document. ${outstanding.length} other signer${outstanding.length === 1 ? '' : 's'} still to complete: ${outstanding.map(other => other.name).join(', ')}.`,
+        code: 'awaiting_other_signers',
+      });
+    }
+    if (!req.body.consent) return res.status(400).json({ error: 'Electronic signature consent is required' });
     const values = req.body.values || {}; // A read-only field is never counted as outstanding: the signer has no way to
 // fill one, so requiring it would make the document impossible to submit.
     const required = doc.fields.filter(f => String(f.signerId) === String(signer._id) && f.required && !f.readOnly); if (required.some(f => values[String(f._id)] === undefined || values[String(f._id)] === '')) return res.status(400).json({ error: 'Please complete all required fields before submitting' });
@@ -213,7 +274,31 @@ router.post('/request/:token/complete', async (req, res, next) => {
       const bytes = await pdf.save(); doc.signedFile = await storage.save('signed', Buffer.from(bytes)); doc.signedHash = hash(bytes); doc.status = 'Signed'; doc.completedAt = new Date(); doc.audits.push(audit(req, 'signed_pdf_generated', { sha256: doc.signedHash }), audit(req, 'request_completed'));
       if (process.env.SIGN_CERTIFICATE_ENABLED !== 'false') { const certificate=await PDFDocument.create(); await appendCompletionCertificate(certificate,doc,doc.signedHash); const certificateBytes=await certificate.save(); doc.certificateFile=await storage.save('certificates',Buffer.from(certificateBytes)); doc.certificateHash=hash(certificateBytes); doc.audits.push(audit(req,'completion_certificate_generated',{sha256:doc.certificateHash})); }
       for (const [index, completedSigner] of doc.signers.entries()) { try { await mail.sendCompletion({ signer: completedSigner, document: doc, notifyHr: index === 0 }); doc.audits.push(audit(req,'completion_email_sent',{email:completedSigner.email},completedSigner._id)); } catch(err) { doc.audits.push(audit(req,'email_delivery_failed',{email:completedSigner.email,message:err.message},completedSigner._id)); } }
-    } else doc.status = 'Partially Signed'; await Promise.all([access.save(), doc.save()]);
+    } else {
+      doc.status = 'Partially Signed';
+      // The moment the last ordinary signer finishes, the approver's turn
+      // begins - issue them a fresh link and tell them. Their earlier tokens
+      // are revoked so only the link in this email is live.
+      const approver = finalApproverOf(doc);
+      if (approver && approver.status !== 'completed' && approver.status !== 'declined' && allOthersComplete(doc, approver)) {
+        try {
+          // The approver's existing link is deliberately left alive. Only its
+          // hash is stored, so a fresh token is the only way to put a working
+          // link in the email - but revoking the old one would break the tab
+          // they may already have open watching progress. Both stay valid;
+          // completion revokes the one actually used, and accessFor() refuses
+          // every token once the document reaches Signed.
+          const approverToken = crypto.randomBytes(32).toString('base64url');
+          await SignAccess.create({ documentId: doc._id, signerId: approver._id, tokenHash: hash(approverToken), expiresAt: doc.expiresAt || new Date(Date.now() + Number(process.env.DEFAULT_SIGN_VALID_DAYS || 7) * 86400000) });
+          await mail.sendFinalApprovalReady({ signer: approver, document: doc, url: `${process.env.APP_URL || 'http://localhost:5173'}/sign/request/${approverToken}`, signedBy: otherSigners(doc, approver).map(other => other.name) });
+          doc.audits.push(audit(req, 'final_approval_requested', { email: approver.email }, approver._id));
+        } catch (err) {
+          // Delivery must not roll back a signature that already happened.
+          doc.audits.push(audit(req, 'email_delivery_failed', { email: approver.email, message: err.message }, approver._id));
+        }
+      }
+    }
+    await Promise.all([access.save(), doc.save()]);
     await trackSigner(req, doc, signer, 'document.signed_by_signer', `${signer.name} signed "${doc.title}"`, { status: doc.status });
     if (doc.status === 'Signed') await trackSigner(req, doc, signer, 'document.completed', `"${doc.title}" was completed by all signers`, { reference: doc.referenceNumber });
     res.json({ ok: true, status: doc.status });

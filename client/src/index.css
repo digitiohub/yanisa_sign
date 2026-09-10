@@ -1364,3 +1364,106 @@ td {
   background: #f1f5f9;
   color: #64748b;
 }
+
+/* --- Final approver ------------------------------------------------------ */
+/* The signer who closes the document: held back until everyone else signs. */
+.approver-toggle {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  margin-top: 1.1rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.75rem;
+  padding: 0.8rem;
+  cursor: pointer;
+}
+.approver-toggle:hover { border-color: #c7d2fe; background: #f8fafc; }
+.approver-toggle input { margin-top: 0.15rem; }
+.approver-toggle span { display: flex; flex-direction: column; gap: 0.2rem; }
+.approver-toggle b { font-size: 0.85rem; color: #0f172a; }
+.approver-toggle small { font-size: 0.75rem; line-height: 1.45; color: #64748b; }
+
+.approver-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  margin-left: 0.4rem;
+  border-radius: 999px;
+  background: #eef2ff;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #4338ca;
+  vertical-align: middle;
+}
+
+.approver-wait {
+  width: min(1080px, 100%);
+  margin: 1rem auto 0;
+  border: 1px solid #c7d2fe;
+  border-radius: 1rem;
+  background: #eef2ff;
+  padding: 1rem 1.1rem;
+}
+.approver-wait-head { display: flex; align-items: flex-start; gap: 0.7rem; color: #3730a3; }
+.approver-wait-head > div { flex: 1; display: flex; flex-direction: column; gap: 0.15rem; }
+.approver-wait-head b { font-size: 0.95rem; }
+.approver-wait-head span { font-size: 0.8rem; line-height: 1.5; color: #4c51bf; }
+.approver-wait-head .secondary-button { flex-shrink: 0; background: white; }
+.approver-wait-list { margin-top: 0.9rem; display: flex; flex-direction: column; gap: 0.35rem; }
+.approver-wait-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  border-radius: 0.6rem;
+  background: white;
+  padding: 0.55rem 0.75rem;
+  font-size: 0.82rem;
+  color: #64748b;
+}
+.approver-wait-list li > div { flex: 1; display: flex; flex-direction: column; }
+.approver-wait-list b { font-size: 0.85rem; color: #0f172a; }
+.approver-wait-list small { font-size: 0.72rem; color: #94a3b8; }
+.approver-wait-list li.done { color: #047857; }
+.approver-wait-list li.declined { color: #b91c1c; }
+
+/* Another signer's completed value, shown to the approver for verification. */
+.witness-field {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #a7f3d0;
+  border-radius: 0.25rem;
+  background: #ecfdf533;
+  overflow: visible;
+  pointer-events: none;
+}
+.witness-field img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.witness-field span { font-size: 0.75rem; color: #0f172a; }
+.witness-field em {
+  position: absolute;
+  top: -0.85rem;
+  left: 0;
+  font-size: 0.55rem;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #059669;
+  white-space: nowrap;
+}
+
+/* Final approver waiting: the finish bar stays visible but inert, so it is
+   clear that signing is coming rather than missing. */
+.public-finish-card.locked { opacity: 0.97; }
+.finish-locked-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: #64748b;
+}
+.public-finish-card.locked .primary-button { opacity: 0.5; cursor: not-allowed; }

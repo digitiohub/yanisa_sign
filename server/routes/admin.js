@@ -9,10 +9,13 @@ const ActivityLog = require('../models/ActivityLog');
 const LoginAttempt = require('../models/LoginAttempt');
 const SignDocument = require('../models/SignDocument');
 const Company = require('../models/Company');
+const MailSetting = require('../models/MailSetting');
 const { authenticate, permit } = require('../middleware/auth');
 const { logAuditEvent } = require('../services/audit');
 const { issueOtp } = require('../services/otp');
 const { sendEmail } = require('../services/email');
+const { buildTransport, invalidateMailer, loadSetting, fromHeader } = require('../config/mailer');
+const { encryptSecret, decryptSecret } = require('../utils/secretBox');
 const { PERMISSIONS, PERMISSION_KEYS, hasPermission } = require('../config/permissions');
 
 const router = express.Router();
@@ -475,6 +478,117 @@ router.get('/login-attempts', permit('audit.view'), async (req, res, next) => {
     const attempts = await LoginAttempt.find(filter).sort({ createdAt: -1 }).limit(Math.min(Number(req.query.limit) || 50, 200)).lean();
     return res.json(attempts);
   } catch (err) { return next(err); }
+});
+
+// --------------------------------------------------------- mail settings
+
+// The password is deliberately absent: it is write-only over the API. The UI
+// shows whether one is stored and lets it be replaced, never read back.
+const mailSettingView = setting => ({
+  enabled: Boolean(setting?.enabled),
+  host: setting?.host || '',
+  port: setting?.port ?? 587,
+  secure: Boolean(setting?.secure),
+  username: setting?.username || '',
+  hasPassword: Boolean(setting?.passwordEncrypted),
+  fromName: setting?.fromName || 'Yanisa Sign',
+  fromEmail: setting?.fromEmail || '',
+  lastTestedAt: setting?.lastTestedAt || null,
+  lastTestOk: setting?.lastTestOk ?? null,
+  lastTestError: setting?.lastTestError || '',
+  updatedAt: setting?.updatedAt || null,
+});
+
+router.get('/mail-settings', permit('settings.view'), async (req, res, next) => {
+  try {
+    return res.json(mailSettingView(await loadSetting()));
+  } catch (err) { return next(err); }
+});
+
+const mailSettingSchema = z.object({
+  enabled: z.boolean().optional(),
+  host: z.string().trim().max(253).optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  secure: z.boolean().optional(),
+  username: z.string().trim().max(320).optional(),
+  // Omitted entirely = keep what is stored. Empty string = clear it. That
+  // distinction is why the field is nullable rather than defaulted.
+  password: z.string().max(512).nullable().optional(),
+  fromName: z.string().trim().max(120).optional(),
+  fromEmail: z.string().trim().toLowerCase().email('Enter a valid sender address.').or(z.literal('')).optional(),
+});
+
+router.put('/mail-settings', permit('settings.edit'), validate(mailSettingSchema), async (req, res, next) => {
+  try {
+    const current = await loadSetting();
+    const next$ = { ...req.body };
+    const password = next$.password;
+    delete next$.password;
+
+    // Refuse to switch mail on while it is still incomplete, otherwise every
+    // send fails silently into the dev outbox and looks like a lost email.
+    const merged = { ...mailSettingView(current), ...next$ };
+    if (merged.enabled && (!merged.host || !merged.fromEmail)) {
+      return res.status(400).json({ error: 'A host and a sender address are required before mail can be enabled.' });
+    }
+
+    const update = { ...next$, updatedByUserId: req.user._id };
+    if (password !== undefined) update.passwordEncrypted = password ? encryptSecret(password) : '';
+
+    const saved = await MailSetting.findOneAndUpdate(
+      { key: 'global' },
+      { $set: update, $setOnInsert: { key: 'global' } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).select('+passwordEncrypted').lean();
+
+    // Drop the cached pool so the very next send picks the new settings up.
+    invalidateMailer();
+    await logAuditEvent({
+      req, actor: req.user, action: 'settings.mail_updated', entityType: 'settings', entityId: saved._id,
+      description: `${req.user.fullName} updated the mail settings`,
+      metadata: { host: saved.host, port: saved.port, enabled: saved.enabled, passwordChanged: password !== undefined },
+    });
+    return res.json(mailSettingView(saved));
+  } catch (err) { return next(err); }
+});
+
+/**
+ * Opens a real connection and sends a real message to the requesting
+ * administrator. Uses whatever is stored, so it proves the saved settings work
+ * rather than a copy of them held in the browser.
+ */
+router.post('/mail-settings/test', permit('settings.edit'), async (req, res, next) => {
+  let transporter = null;
+  try {
+    const setting = await loadSetting();
+    if (!setting || !setting.host || !setting.fromEmail) return res.status(400).json({ error: 'Save a host and a sender address before sending a test.' });
+
+    const to = String(req.body?.to || req.user.email).toLowerCase().trim();
+    transporter = buildTransport({
+      host: setting.host, port: setting.port, secure: setting.secure,
+      username: setting.username, password: decryptSecret(setting.passwordEncrypted) || '',
+    });
+    await transporter.verify();
+    await transporter.sendMail({
+      from: fromHeader(setting),
+      to,
+      subject: 'Yanisa Sign test email',
+      text: `This is a test message from Yanisa Sign, sent via ${setting.host}. If you can read it, outgoing mail is working.`,
+      html: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:600px;margin:auto;color:#172033"><p style="color:#1d4ed8;font-weight:700;letter-spacing:.14em;font-size:12px">YANISA SIGN</p><h2 style="margin:8px 0 16px">Outgoing mail is working</h2><p>This test message was sent via <b>${setting.host}</b> by ${req.user.fullName}.</p></div>`,
+    });
+
+    await MailSetting.updateOne({ key: 'global' }, { $set: { lastTestedAt: new Date(), lastTestOk: true, lastTestError: '' } });
+    await logAuditEvent({ req, actor: req.user, action: 'settings.mail_tested', entityType: 'settings', entityId: setting._id, description: `${req.user.fullName} sent a test email to ${to}`, metadata: { host: setting.host, ok: true } });
+    return res.json({ ok: true, message: `Test email sent to ${to}.` });
+  } catch (err) {
+    // A failed test is an expected outcome, not a server error: it is recorded
+    // and returned as a message the administrator can act on.
+    await MailSetting.updateOne({ key: 'global' }, { $set: { lastTestedAt: new Date(), lastTestOk: false, lastTestError: err.message } }).catch(() => {});
+    return res.status(400).json({ error: `Test failed: ${err.message}` });
+  } finally {
+    // Built for this one check, so it is closed rather than left in the pool.
+    if (transporter) transporter.close();
+  }
 });
 
 module.exports = router;

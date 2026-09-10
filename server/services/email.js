@@ -1,23 +1,13 @@
 const fs = require('fs/promises');
 const path = require('path');
-const nodemailer = require('nodemailer');
+const { getMailer } = require('../config/mailer');
 
-// Provider-agnostic mailer: swap SMTP for SES/Resend/SendGrid by replacing
-// `deliver` only. Everything else calls sendEmail({ to, subject, template,
-// variables }) and never touches a provider SDK.
-function transport() {
-  if (!process.env.SMTP_HOST) return null;
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD } : undefined,
-  });
-}
+// Provider-agnostic mailer. The SMTP server itself is configured in
+// Administration > Mail and lives in the database, so nothing here reads
+// SMTP_* from the environment; config/mailer.js owns the pooled transport.
 
 const brand = '#1d4ed8';
 const appUrl = () => (process.env.APP_URL || 'http://localhost:5173').replace(/\/$/, '');
-const from = () => `"${process.env.MAIL_FROM_NAME || 'Yanisa Sign'}" <${process.env.MAIL_FROM_EMAIL || 'tech@yanisa.in'}>`;
 
 const layout = (title, body) => `<div style="font-family:Arial,Helvetica,sans-serif;max-width:600px;margin:auto;color:#172033">
   <p style="color:${brand};font-weight:700;letter-spacing:.14em;font-size:12px">YANISA SIGN</p>
@@ -115,16 +105,17 @@ async function sendEmail({ to, template, variables = {}, subject, cc, bcc, attac
   const builder = TEMPLATES[template];
   if (!builder) throw new Error(`Unknown email template: ${template}`);
   const rendered = builder(variables);
-  const payload = { from: from(), to, cc, bcc, subject: subject || rendered.subject, html: rendered.html, attachments };
-  const client = transport();
-  if (!client) {
-    if (process.env.NODE_ENV === 'production') throw new Error('SMTP is not configured');
-    console.log(`[mail:dev] ${template} -> ${to} :: ${payload.subject}${variables.otp ? ` (code ${variables.otp})` : ''}`);
-    await writeDevOutbox({ to, template, subject: payload.subject, variables });
+  const mailer = await getMailer();
+  if (!mailer) {
+    // Mail switched off or not configured yet. Same contract as before: a
+    // development install logs and keeps going, production refuses loudly.
+    if (process.env.NODE_ENV === 'production') throw new Error('SMTP is not configured. Set it up in Administration > Mail.');
+    console.log(`[mail:dev] ${template} -> ${to} :: ${subject || rendered.subject}${variables.otp ? ` (code ${variables.otp})` : ''}`);
+    await writeDevOutbox({ to, template, subject: subject || rendered.subject, variables });
     return { delivered: false, devOutbox: true };
   }
-  await client.sendMail(payload);
+  await mailer.transporter.sendMail({ from: mailer.from, to, cc, bcc, subject: subject || rendered.subject, html: rendered.html, attachments });
   return { delivered: true };
 }
 
-module.exports = { sendEmail, TEMPLATES, transport };
+module.exports = { sendEmail, TEMPLATES, writeDevOutbox };

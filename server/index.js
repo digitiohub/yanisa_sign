@@ -14,6 +14,7 @@ const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 const { initStorage } = require('./services/storage');
 const { bootstrap } = require('./services/bootstrap');
+const { warmMailer } = require('./config/mailer');
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
 
@@ -70,6 +71,9 @@ async function start() {
       await mongoose.connect(process.env.MONGO_URI);
       console.log('MongoDB connected');
       await bootstrap();
+      // Surfaces a broken SMTP configuration in the boot log rather than on
+      // the first user's sign-in.
+      await warmMailer();
     }
     await initStorage();
 
