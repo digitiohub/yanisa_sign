@@ -9,6 +9,7 @@
     "build": "cd client && npm run build",
     "start": "node server/index.js",
     "seed:demo": "node scripts/seed-demo-users.js",
+    "login:code": "node scripts/show-login-code.js",
     "test": "node --test server/tests/",
     "lint": "node --check server/index.js && node --check server/routes/sign.js"
   },
