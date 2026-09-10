@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  Activity, ArrowLeft, Check, ChevronDown, ChevronRight, FileText, Loader2, Lock, Mail, MoreVertical, Plus,
+  Activity, AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, FileText, Loader2, Lock, Mail, MailCheck, MinusCircle, MoreVertical, Plus,
   RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Trash2, UserPlus, Users, X,
 } from 'lucide-react';
 import { api, errorText, formatDate, formatDateTime, initials, timeAgo } from './api';
@@ -19,6 +19,7 @@ function AdminFrame({ title, subtitle, actions, children }) {
     ['/admin/activity', 'Activity', Activity, 'activity.view'],
     ['/admin/audit', 'Audit log', Lock, 'audit.view'],
     ['/admin/mail', 'Mail', Mail, 'settings.view'],
+    ['/admin/email-logs', 'Email log', MailCheck, 'settings.view'],
   ].filter(([, , , permission]) => !permission || auth.can(permission));
   return <main className="mx-auto max-w-[1500px] p-5 lg:p-8">
     <div className="flex flex-wrap items-end justify-between gap-4">
@@ -695,5 +696,122 @@ export function MailSettingsPage() {
         </div>
       </div>
     </div>
+  </AdminFrame>;
+}
+
+const EMAIL_STATUS = {
+  sent: ['Sent', 'status-signed', Check],
+  failed: ['Failed', 'status-declined', AlertTriangle],
+  skipped: ['Skipped', 'status-draft', MinusCircle],
+};
+
+/**
+ * Delivery history for every message the app sends. Bodies and template
+ * variables are not stored, so this shows the envelope and the outcome only -
+ * enough to answer "did it arrive, and if not, why".
+ */
+export function EmailLogsPage() {
+  const [data, setData] = useState({ logs: [], total: 0, templates: [], summary: {} });
+  const [filters, setFilters] = useState({ q: '', status: '', template: '', from: '', to: '' });
+  const [limit, setLimit] = useState(50);
+  const [selected, setSelected] = useState(null);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(() => {
+    setBusy(true);
+    const params = Object.fromEntries(Object.entries({ ...filters, limit }).filter(([, v]) => v !== '' && v != null));
+    api.get('/admin/email-logs', { params })
+      .then(({ data: body }) => setData(body))
+      .catch(failure => setError(errorText(failure)))
+      .finally(() => setBusy(false));
+  }, [filters, limit]);
+  // Debounced so typing in the search box does not fire a request per keystroke.
+  useEffect(() => { const timer = setTimeout(load, 250); return () => clearTimeout(timer); }, [load]);
+
+  const tiles = [
+    ['Sent', data.summary?.sent ?? 0, Check, 'text-emerald-600'],
+    ['Failed', data.summary?.failed ?? 0, AlertTriangle, 'text-red-600'],
+    ['Skipped', data.summary?.skipped ?? 0, MinusCircle, 'text-slate-400'],
+  ];
+
+  return <AdminFrame title="Email log" subtitle="Every message the app has tried to send, newest first.">
+    {error && <div className="error-box">{error}</div>}
+    <div className="mt-6 grid gap-4 sm:grid-cols-3">
+      {tiles.map(([label, value, Icon, tone]) => <div key={label} className="card flex items-center gap-4">
+        <Icon className={tone} size={22} />
+        <div><p className="text-2xl font-semibold">{value}</p><p className="text-sm text-slate-500">{label}</p></div>
+      </div>)}
+    </div>
+
+    <div className="card mt-5 p-0">
+      <div className="flex flex-wrap gap-3 border-b border-slate-200 p-4">
+        <div className="relative min-w-56 flex-1">
+          <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
+          <input className="w-full pl-10" placeholder="Search recipient or subject" value={filters.q} onChange={event => setFilters({ ...filters, q: event.target.value })} />
+        </div>
+        <select value={filters.status} onChange={event => setFilters({ ...filters, status: event.target.value })}>
+          <option value="">All statuses</option>
+          <option value="sent">Sent</option><option value="failed">Failed</option><option value="skipped">Skipped</option>
+        </select>
+        <select value={filters.template} onChange={event => setFilters({ ...filters, template: event.target.value })}>
+          <option value="">All types</option>
+          {(data.templates || []).map(t => <option key={t} value={t}>{t.replace(/_/g, ' ')}</option>)}
+        </select>
+        <input type="date" value={filters.from} onChange={event => setFilters({ ...filters, from: event.target.value })} />
+        <input type="date" value={filters.to} onChange={event => setFilters({ ...filters, to: event.target.value })} />
+        <button className="secondary-button" onClick={load}><RefreshCw size={15} />Refresh</button>
+      </div>
+      <div className="overflow-x-auto">
+        <table>
+          <thead><tr><th>When</th><th>Recipient</th><th>Subject</th><th>Type</th><th>Status</th><th /></tr></thead>
+          <tbody>
+            {busy && !data.logs.length ? <tr><td colSpan="6" className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600" /></td></tr>
+              : data.logs.length === 0 ? <tr><td colSpan="6" className="py-16 text-center text-slate-500">No messages match these filters.</td></tr>
+                : data.logs.map(log => {
+                  const [label, cls] = EMAIL_STATUS[log.status] || [log.status, 'status-draft'];
+                  return <tr key={log._id} className="cursor-pointer" onClick={() => setSelected(log)}>
+                    <td className="whitespace-nowrap"><b>{new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</b><small className="block text-slate-500">{formatDate(log.createdAt)}</small></td>
+                    <td>{log.to}{(log.cc?.length || log.bcc?.length) ? <small className="block text-slate-500">+{(log.cc?.length || 0) + (log.bcc?.length || 0)} copied</small> : null}</td>
+                    <td className="max-w-sm truncate">{log.subject || '—'}</td>
+                    <td><code className="text-xs">{log.template}</code></td>
+                    <td><span className={`status ${cls}`}>{label}</span></td>
+                    <td><ChevronRight size={16} className="text-slate-400" /></td>
+                  </tr>;
+                })}
+          </tbody>
+        </table>
+      </div>
+      {data.logs.length < data.total && <div className="border-t border-slate-200 p-3 text-center">
+        <button className="secondary-button" onClick={() => setLimit(limit + 50)}><ChevronDown size={16} />Load more ({data.logs.length} of {data.total})</button>
+      </div>}
+    </div>
+
+    {selected && <div className="modal-backdrop" onClick={() => setSelected(null)}>
+      <div className="modal max-w-lg" onClick={event => event.stopPropagation()}>
+        <div className="flex items-start justify-between">
+          <div><p className="eyebrow">Email</p><h2 className="text-xl font-semibold">{selected.subject || selected.template}</h2></div>
+          <button onClick={() => setSelected(null)}><X /></button>
+        </div>
+        <dl className="mt-4 space-y-2 text-sm">
+          {[['Status', (EMAIL_STATUS[selected.status] || [selected.status])[0]],
+            ['To', selected.to],
+            ['Cc', selected.cc?.join(', ')],
+            ['Bcc', selected.bcc?.join(', ')],
+            ['Type', selected.template],
+            ['Server', selected.host],
+            ['Attachments', selected.attachments?.join(', ')],
+            ['Message id', selected.messageId],
+            ['Took', selected.durationMs != null ? `${selected.durationMs} ms` : null],
+            ['When', formatDateTime(selected.createdAt)]]
+            .filter(([, value]) => value)
+            .map(([label, value]) => <div key={label} className="flex gap-3">
+              <dt className="w-28 shrink-0 text-slate-500">{label}</dt><dd className="break-all">{value}</dd>
+            </div>)}
+        </dl>
+        {selected.error && <div className="error-box">{selected.error}</div>}
+        <p className="mt-4 text-xs text-slate-400">Message contents are not stored: these logs deliberately exclude bodies and template variables, which carry sign-in codes and signing links.</p>
+      </div>
+    </div>}
   </AdminFrame>;
 }

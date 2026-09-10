@@ -10,6 +10,7 @@ const LoginAttempt = require('../models/LoginAttempt');
 const SignDocument = require('../models/SignDocument');
 const Company = require('../models/Company');
 const MailSetting = require('../models/MailSetting');
+const EmailLog = require('../models/EmailLog');
 const { authenticate, permit } = require('../middleware/auth');
 const { logAuditEvent } = require('../services/audit');
 const { issueOtp } = require('../services/otp');
@@ -589,6 +590,52 @@ router.post('/mail-settings/test', permit('settings.edit'), async (req, res, nex
     // Built for this one check, so it is closed rather than left in the pool.
     if (transporter) transporter.close();
   }
+});
+
+// ------------------------------------------------------------ email log
+
+/**
+ * GET /api/admin/email-logs
+ * Delivery history, newest first. Envelope and outcome only - message bodies
+ * and template variables are never stored (see models/EmailLog.js).
+ */
+router.get('/email-logs', permit('settings.view'), async (req, res, next) => {
+  try {
+    const filter = {};
+    if (req.query.status) filter.status = String(req.query.status);
+    if (req.query.template) filter.template = String(req.query.template);
+    if (req.query.q) {
+      const term = String(req.query.q).trim().slice(0, 120);
+      // Escaped: a recipient address contains dots, and a subject can contain
+      // anything a user typed.
+      const safe = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [{ to: safe }, { subject: safe }];
+    }
+    if (req.query.from || req.query.to) {
+      filter.createdAt = {};
+      if (req.query.from) filter.createdAt.$gte = new Date(req.query.from);
+      if (req.query.to) { const end = new Date(req.query.to); end.setHours(23, 59, 59, 999); filter.createdAt.$lte = end; }
+    }
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const [logs, total, templates, counts] = await Promise.all([
+      EmailLog.find(filter).sort({ createdAt: -1 }).skip(Number(req.query.skip) || 0).limit(limit).lean(),
+      EmailLog.countDocuments(filter),
+      EmailLog.distinct('template'),
+      EmailLog.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
+    ]);
+    return res.json({
+      logs, total, templates: templates.sort(),
+      summary: counts.reduce((all, row) => ({ ...all, [row._id]: row.n }), { sent: 0, failed: 0, skipped: 0 }),
+    });
+  } catch (err) { return next(err); }
+});
+
+router.get('/email-logs/:id', permit('settings.view'), async (req, res, next) => {
+  try {
+    const log = await EmailLog.findById(req.params.id).lean();
+    if (!log) return res.status(404).json({ error: 'Email log entry not found' });
+    return res.json(log);
+  } catch (err) { return next(err); }
 });
 
 module.exports = router;

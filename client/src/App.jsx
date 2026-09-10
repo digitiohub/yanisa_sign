@@ -8,7 +8,7 @@ import { api, errorText, formatDate, formatDateTime, getAccessToken, initials } 
 import { AuthProvider, Protected, useAuth } from './auth-context';
 import { AcceptInvitePage, ForgotPasswordPage, LoginPage } from './auth-pages';
 import { MyActivityPage, ProfilePage, SecurityPage } from './profile-pages';
-import { ActivityPage, AdminDashboard, AuditPage, MailSettingsPage, RolesPage, UserDetailPage, UsersPage } from './admin-pages';
+import { ActivityPage, AdminDashboard, AuditPage, EmailLogsPage, MailSettingsPage, RolesPage, UserDetailPage, UsersPage } from './admin-pages';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
 const fieldTypes = ['signature', 'initials', 'name', 'email', 'phone', 'company', 'text', 'multiline', 'checkbox', 'radio', 'selection', 'date', 'strikethrough', 'stamp'];
@@ -497,6 +497,7 @@ export default function App() {
       <Route path="/admin/activity" element={<Protected permission="activity.view"><Shell><ActivityPage /></Shell></Protected>} />
       <Route path="/admin/audit" element={<Protected permission="audit.view"><Shell><AuditPage /></Shell></Protected>} />
       <Route path="/admin/mail" element={<Protected permission="settings.view"><Shell><MailSettingsPage /></Shell></Protected>} />
+      <Route path="/admin/email-logs" element={<Protected permission="settings.view"><Shell><EmailLogsPage /></Shell></Protected>} />
 
       <Route path="*" element={<Protected permission="documents.view"><Dashboard /></Protected>} />
     </Routes>

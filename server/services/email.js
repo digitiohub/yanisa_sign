@@ -1,6 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { getMailer } = require('../config/mailer');
+const { deliver } = require('../config/mailer');
 
 // Provider-agnostic mailer. The SMTP server itself is configured in
 // Administration > Mail and lives in the database, so nothing here reads
@@ -101,21 +101,23 @@ async function writeDevOutbox(entry) {
 /**
  * @param {{to:string, template:keyof TEMPLATES, variables?:object, subject?:string, cc?:string[], bcc?:string[], attachments?:object[]}} message
  */
-async function sendEmail({ to, template, variables = {}, subject, cc, bcc, attachments }) {
+async function sendEmail({ to, template, variables = {}, subject, cc, bcc, attachments, context = {} }) {
   const builder = TEMPLATES[template];
   if (!builder) throw new Error(`Unknown email template: ${template}`);
   const rendered = builder(variables);
-  const mailer = await getMailer();
-  if (!mailer) {
-    // Mail switched off or not configured yet. Same contract as before: a
-    // development install logs and keeps going, production refuses loudly.
-    if (process.env.NODE_ENV === 'production') throw new Error('SMTP is not configured. Set it up in Administration > Mail.');
-    console.log(`[mail:dev] ${template} -> ${to} :: ${subject || rendered.subject}${variables.otp ? ` (code ${variables.otp})` : ''}`);
-    await writeDevOutbox({ to, template, subject: subject || rendered.subject, variables });
-    return { delivered: false, devOutbox: true };
-  }
-  await mailer.transporter.sendMail({ from: mailer.from, to, cc, bcc, subject: subject || rendered.subject, html: rendered.html, attachments });
-  return { delivered: true };
+  const line = { to, cc, bcc, subject: subject || rendered.subject, html: rendered.html, attachments };
+  // deliver() writes the Administration > Email log row and decides between
+  // sending, the development outbox and failing loudly in production.
+  return deliver(line, {
+    template,
+    companyId: context.companyId,
+    documentId: context.documentId,
+    actorUserId: context.actorUserId,
+    devOutbox: async () => {
+      console.log(`[mail:dev] ${template} -> ${to} :: ${line.subject}${variables.otp ? ` (code ${variables.otp})` : ''}`);
+      await writeDevOutbox({ to, template, subject: line.subject, variables });
+    },
+  });
 }
 
 module.exports = { sendEmail, TEMPLATES, writeDevOutbox };

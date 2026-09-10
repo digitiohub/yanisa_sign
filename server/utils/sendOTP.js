@@ -1,6 +1,6 @@
 const fs = require('fs/promises');
 const path = require('path');
-const { getMailer } = require('../config/mailer');
+const { deliver } = require('../config/mailer');
 
 const brand = '#1d4ed8';
 
@@ -36,23 +36,21 @@ async function writeDevOutbox(entry) {
  * never be relied on to shape the HTTP response.
  */
 async function sendOTP(email, otp, minutes) {
-  // Resolved per send, but cached in config/mailer.js - this is a lookup of an
-  // already-built pool, not a new connection.
-  const mailer = await getMailer();
-  if (!mailer) {
-    if (process.env.NODE_ENV === 'production') throw new Error('SMTP is not configured');
-    console.log(`[mail:dev] login code for ${email} :: ${otp}`);
-    await writeDevOutbox({ to: email, template: 'login_otp', subject: 'Your Yanisa Sign sign-in code', variables: { otp } });
-    return { delivered: false, devOutbox: true };
-  }
-  await mailer.transporter.sendMail({
-    from: mailer.from,
+  // Routed through deliver() so the send lands in Administration > Email log
+  // like every other message. The code itself goes only to the development
+  // outbox callback - the log row deliberately never sees it.
+  return deliver({
     to: email,
     subject: 'Your Yanisa Sign sign-in code',
     text: `Your Yanisa Sign sign-in code is ${otp}. It expires in ${minutes} minute${minutes === 1 ? '' : 's'}.`,
     html: template(otp, minutes),
+  }, {
+    template: 'login_otp',
+    devOutbox: async () => {
+      console.log(`[mail:dev] login code for ${email} :: ${otp}`);
+      await writeDevOutbox({ to: email, template: 'login_otp', subject: 'Your Yanisa Sign sign-in code', variables: { otp } });
+    },
   });
-  return { delivered: true };
 }
 
 module.exports = { sendOTP };
