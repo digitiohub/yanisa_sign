@@ -10,6 +10,7 @@ const VERTICALS = [
   ['media', 'Media'],
   ['studio', 'Studio'],
   ['brand_collaboration', 'Brand Collaboration'],
+  ['central', 'Central'],
   ['unassigned', 'Unassigned'],
 ];
 

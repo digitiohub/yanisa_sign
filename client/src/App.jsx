@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Routes, Route, useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import * as pdfjs from 'pdfjs-dist';
-import { Activity, AlignCenter, AlignLeft, AlignRight, ArrowLeft, Building2, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Copy, Download, FileSignature, FileText, Loader2, Lock, LogOut, Mail, Minus, MoreVertical, PenLine, Phone, Plus, RefreshCw, Search, Send, Share2, ShieldCheck, Stamp, Strikethrough, Trash2, Type, Upload, User, X } from 'lucide-react';
+import { Activity, AlignCenter, AlignLeft, AlignRight, ArrowLeft, Building2, CalendarDays, Check, CheckSquare2, ChevronDown, ChevronLeft, ChevronRight, CircleDot, Copy, Download, FileSignature, FileText, Folder, FolderOpen, Loader2, Lock, LogOut, Mail, Minus, MoreVertical, PenLine, Phone, Plus, RefreshCw, Search, Send, Share2, ShieldCheck, Stamp, Strikethrough, Trash2, Type, Upload, User, X } from 'lucide-react';
 import { FALLBACK_PAGE, MIN_FIELD_PX, calculateDrag, calculateResize, clampFieldToPage, fieldSizeFromPixels, fieldSizeInPixels, findFreeSpot, getDefaultFieldSize, sizeToFractions } from './fieldGeometry';
 import { api, errorText, formatDate, formatDateTime, getAccessToken, initials } from './api';
 import { AuthProvider, Protected, useAuth } from './auth-context';
@@ -69,7 +69,7 @@ function Dashboard() {
   const navigate = useNavigate();
   const uploadRef = useRef();
   const [docs, setDocs] = useState([]);
-  const [filters, setFilters] = useState({ status: '', q: '', ownerId: '', workspaceId: '', vertical: '' });
+  const [filters, setFilters] = useState({ status: '', q: '', ownerId: '', workspaceId: '' });
   const [people, setPeople] = useState([]);
   const [teams, setTeams] = useState([]);
   const [verticals, setVerticals] = useState([]);
@@ -78,6 +78,10 @@ function Dashboard() {
 
   // Only someone who can see the whole organisation gets the user/team filters.
   const orgWide = auth.can('documents.view_all');
+  // Filing a document into a vertical decides who can see it at all, so it
+  // mirrors the server's canMoveVertical exactly. The request is authorised
+  // there too - this only decides whether the control is worth drawing.
+  const canMoveVertical = orgWide && auth.can('documents.edit');
   // The verticals this account can reach, and the one a new upload lands in.
   const mine = auth.user?.verticals || [];
   const [target, setTarget] = useState(mine[0] || 'unassigned');
@@ -91,7 +95,7 @@ function Dashboard() {
       setDocs(data);
     } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
   };
-  useEffect(() => { load(); }, [filters.status, filters.ownerId, filters.workspaceId, filters.vertical]);
+  useEffect(() => { load(); }, [filters.status, filters.ownerId, filters.workspaceId]);
   useEffect(() => {
     if (!orgWide || !auth.can('users.view')) return;
     api.get('/admin/users', { params: { limit: 200 } }).then(({ data }) => setPeople(data.users)).catch(() => {});
@@ -127,6 +131,30 @@ function Dashboard() {
     try { if (type === 'delete') await api.delete(`/sign/${doc._id}`); else await api.post(`/sign/${doc._id}/cancel`); load(); }
     catch (failure) { setError(errorText(failure)); }
   };
+  // A folder per vertical: the whole catalogue for someone who sees the entire
+  // organisation, only their own assignments for everyone else. The catalogue
+  // request can fail, so the keys on the account are the fallback.
+  const folders = useMemo(() => {
+    const catalogue = verticals.length ? verticals : mine.map(key => ({ key, label: verticalLabel([], key) }));
+    return orgWide ? catalogue : catalogue.filter(vertical => mine.includes(vertical.key));
+  }, [verticals, orgWide, mine.join(',')]);
+  // Documents written before verticals existed carry none and belong to the
+  // unassigned folder, exactly as the server reads them.
+  const counts = useMemo(() => docs.reduce((tally, doc) => {
+    const key = doc.vertical || 'unassigned';
+    tally[key] = (tally[key] || 0) + 1;
+    return tally;
+  }, {}), [docs]);
+  // Files a document into another vertical - how anything sitting in Unassigned
+  // reaches the business line it belongs to. The row is updated in place so the
+  // folder counts above follow without a reload.
+  const moveVertical = async (doc, vertical) => {
+    if (vertical === (doc.vertical || 'unassigned')) return;
+    try {
+      await api.patch(`/sign/${doc._id}/vertical`, { vertical });
+      setDocs(current => current.map(row => (row._id === doc._id ? { ...row, vertical } : row)));
+    } catch (failure) { setError(errorText(failure)); }
+  };
   const stats = useMemo(() => ({
     draft: docs.filter(doc => doc.status === 'Draft').length,
     pending: docs.filter(doc => ['Pending Signature', 'Viewed', 'Partially Signed'].includes(doc.status)).length,
@@ -161,6 +189,21 @@ function Dashboard() {
     </div>
 
     {error && <div className="error-box">{error}</div>}
+    {folders.length > 0 && <div className="mt-8">
+      <h2 className="text-lg font-semibold tracking-tight">Verticals</h2>
+      <p className="mt-1 text-sm text-slate-500">Open a folder to work through one business line on its own.</p>
+      <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {folders.map(vertical => <button key={vertical.key} onClick={() => navigate(`/documents/folder/${vertical.key}`)}
+          className="card flex items-center gap-4 text-left transition hover:border-brand-500 hover:shadow-md">
+          <span className="grid h-11 w-11 place-items-center rounded-2xl bg-brand-50 text-brand-600"><Folder size={20} /></span>
+          <div className="min-w-0">
+            <b className="block truncate">{vertical.label}</b>
+            <p className="text-sm text-slate-500">{counts[vertical.key] === 1 ? '1 document' : `${counts[vertical.key] || 0} documents`}</p>
+          </div>
+          <ChevronRight size={18} className="ml-auto shrink-0 text-slate-400" />
+        </button>)}
+      </div>
+    </div>}
     <div className="card mt-6 p-0">
       <div className="flex flex-wrap gap-3 border-b border-slate-200 p-4">
         <div className="relative min-w-64 flex-1">
@@ -171,10 +214,6 @@ function Dashboard() {
         {orgWide && people.length > 0 && <select value={filters.ownerId} onChange={event => setFilters({ ...filters, ownerId: event.target.value })}>
           <option value="">All users</option>
           {people.map(person => <option key={person.id} value={person.id}>{person.fullName}</option>)}
-        </select>}
-        {orgWide && verticals.length > 0 && <select value={filters.vertical} onChange={event => setFilters({ ...filters, vertical: event.target.value })}>
-          <option value="">All verticals</option>
-          {verticals.map(vertical => <option key={vertical.key} value={vertical.key}>{vertical.label}</option>)}
         </select>}
         {orgWide && teams.length > 0 && <select value={filters.workspaceId} onChange={event => setFilters({ ...filters, workspaceId: event.target.value })}>
           <option value="">All teams</option>
@@ -196,7 +235,12 @@ function Dashboard() {
                 : docs.map(doc => <tr key={doc._id}>
                   <td><b>{doc.title}</b><small className="block text-slate-500">{doc.referenceNumber}</small></td>
                   <td>{doc.owner?.fullName || doc.createdBy}<small className="block text-slate-500">{doc.sentAt ? `Sent ${formatDate(doc.sentAt)}` : `Created ${formatDate(doc.createdAt)}`}</small></td>
-                  <td>{verticalLabel(verticals, doc.vertical)}</td>
+                  <td>{canMoveVertical && folders.length > 0
+                    ? <select className="table-select" value={doc.vertical || 'unassigned'} aria-label={`Vertical for ${doc.title}`}
+                      onChange={event => moveVertical(doc, event.target.value)}>
+                      {folders.map(vertical => <option key={vertical.key} value={vertical.key}>{vertical.label}</option>)}
+                    </select>
+                    : verticalLabel(verticals, doc.vertical)}</td>
                   <td>{doc.signers?.length ? `${doc.signers.length} · ${doc.signers[0].name}` : 'Not assigned'}</td>
                   <td><span className={`status status-${doc.status.toLowerCase().replaceAll(' ', '-')}`}>{doc.status}</span></td>
                   <td>{doc.expiresAt ? formatDate(doc.expiresAt) : '—'}</td>
@@ -214,6 +258,101 @@ function Dashboard() {
         </table>
       </div>
     </div>
+  </main></Shell>;
+}
+
+/**
+ * One vertical, opened on its own: nothing but the documents filed in it, laid
+ * out as cards rather than as the table on the Documents tab. Opening a card
+ * lands on the same editor the table does, so what a person may view or change
+ * is decided there and here exactly as before.
+ */
+function FolderPage() {
+  const { vertical } = useParams();
+  const navigate = useNavigate();
+  const auth = useAuth();
+  const [docs, setDocs] = useState([]);
+  const [verticals, setVerticals] = useState([]);
+  const [query, setQuery] = useState('');
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState('');
+  const label = verticalLabel(verticals, vertical);
+  // The catalogue is only needed for the heading, so a folder still opens if it
+  // fails; the key reads well enough on its own until it arrives.
+  useEffect(() => { api.get('/admin/verticals').then(({ data }) => setVerticals(data)).catch(() => {}); }, []);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      // The server honours ?vertical only for an administrator - everyone else
+      // is already pinned to their own - so the folder is narrowed here too.
+      const { data } = await api.get('/sign', { params: { vertical } });
+      setDocs(data.filter(doc => (doc.vertical || 'unassigned') === vertical));
+    } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
+  }, [vertical]);
+  useEffect(() => { load(); }, [load]);
+
+  const download = async doc => {
+    try {
+      const { data } = await api.get(`/sign/${doc._id}/pdf`, { params: { signed: doc.status === 'Signed', download: true }, responseType: 'blob' });
+      const url = URL.createObjectURL(data), link = document.createElement('a');
+      link.href = url; link.download = `${doc.referenceNumber}-${doc.status === 'Signed' ? 'signed' : 'original'}.pdf`; link.click();
+      URL.revokeObjectURL(url);
+    } catch (failure) { setError(errorText(failure)); }
+  };
+  const remove = async doc => {
+    if (!confirm(`Permanently delete "${doc.title}"? This cannot be undone.`)) return;
+    try { await api.delete(`/sign/${doc._id}`); load(); } catch (failure) { setError(errorText(failure)); }
+  };
+
+  const found = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return docs;
+    return docs.filter(doc => [doc.title, doc.referenceNumber, doc.owner?.fullName, doc.createdBy, ...(doc.signers || []).flatMap(signer => [signer.name, signer.email])]
+      .some(value => String(value || '').toLowerCase().includes(needle)));
+  }, [docs, query]);
+
+  return <Shell><main className="mx-auto max-w-[1500px] p-5 lg:p-8">
+    <button onClick={() => navigate('/documents')} className="flex items-center gap-1 text-sm text-slate-500 hover:text-brand-600"><ArrowLeft size={15} />Documents</button>
+    <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
+      <div className="flex items-center gap-3">
+        <span className="grid h-12 w-12 place-items-center rounded-2xl bg-brand-50 text-brand-600"><FolderOpen size={24} /></span>
+        <div>
+          <p className="eyebrow">Vertical</p>
+          <h1 className="text-3xl font-semibold tracking-tight">{label}</h1>
+        </div>
+      </div>
+      <div className="relative min-w-64">
+        <Search className="absolute left-3 top-2.5 text-slate-400" size={18} />
+        <input className="w-full pl-10" placeholder={`Search in ${label}`} value={query} onChange={event => setQuery(event.target.value)} />
+      </div>
+    </div>
+    <p className="mt-3 text-slate-500">{docs.length === 1 ? '1 document' : `${docs.length} documents`} filed in this vertical.</p>
+
+    {error && <div className="error-box">{error}</div>}
+    {busy ? <div className="card mt-6 py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600" /></div>
+      : found.length === 0 ? <div className="card mt-6 py-16 text-center text-slate-500">{docs.length ? 'Nothing matches that search.' : 'No documents in this folder yet.'}</div>
+        : <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {found.map(doc => <div key={doc._id} className="card flex flex-col gap-3 transition hover:border-brand-500 hover:shadow-md">
+            <button onClick={() => navigate(`/documents/${doc._id}/design`)} className="flex items-start gap-3 text-left">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand-50 text-brand-600"><FileText size={18} /></span>
+              <span className="min-w-0">
+                <b className="block truncate">{doc.title}</b>
+                <small className="block text-slate-500">{doc.referenceNumber}</small>
+              </span>
+            </button>
+            <div className="flex items-center justify-between gap-2">
+              <span className={`status status-${doc.status.toLowerCase().replaceAll(' ', '-')}`}>{doc.status}</span>
+              <small className="text-slate-500">{formatDate(doc.updatedAt)}</small>
+            </div>
+            <div className="flex items-center gap-1 border-t border-slate-100 pt-3">
+              <button className="secondary-button" onClick={() => navigate(`/documents/${doc._id}/design`)}>Open</button>
+              {auth.can('documents.download') && <button className="icon-button" title="Download" onClick={() => download(doc)}><Download size={17} /></button>}
+              {auth.can('documents.delete') && <button className="icon-button text-red-600" title="Delete document" aria-label={`Delete ${doc.title}`} onClick={() => remove(doc)}><Trash2 size={17} /></button>}
+              <small className="ml-auto truncate text-slate-500">{doc.owner?.fullName || doc.createdBy}</small>
+            </div>
+          </div>)}
+        </div>}
   </main></Shell>;
 }
 
@@ -526,6 +665,7 @@ export default function App() {
       <Route path="/verify-email" element={<AcceptInvitePage />} />
       <Route path="/sign/request/:token" element={<PublicSignV2 />} />
 
+      <Route path="/documents/folder/:vertical" element={<Protected permission="documents.view"><FolderPage /></Protected>} />
       <Route path="/documents/:id/design" element={<Protected permission="documents.view"><Designer /></Protected>} />
       <Route path="/profile" element={<Protected><Shell><ProfilePage /></Shell></Protected>} />
       <Route path="/profile/security" element={<Protected><Shell><SecurityPage /></Shell></Protected>} />

@@ -741,6 +741,11 @@ select:focus {
   padding: 1.25rem;
   box-shadow: 0 1px 2px #0f172a08;
 }
+.table-select {
+  border-radius: 0.6rem;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.85rem;
+}
 .eyebrow {
   font-size: 0.7rem;
   font-weight: 700;

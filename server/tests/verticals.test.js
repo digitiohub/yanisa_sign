@@ -12,7 +12,7 @@ const userIn = (verticals, permissions = ['documents.view']) => ({ _id: 'user-1'
 const docIn = (vertical, extra = {}) => ({ _id: 'doc-1', companyId, vertical, ownerId: 'someone-else', createdByUserId: 'someone-else', ...extra });
 
 test('the catalogue holds exactly the agreed business lines', () => {
-  assert.deepEqual(VERTICAL_KEYS, ['coworking', 'tech', 'gaas', 'media', 'studio', 'brand_collaboration', 'unassigned']);
+  assert.deepEqual(VERTICAL_KEYS, ['coworking', 'tech', 'gaas', 'media', 'studio', 'brand_collaboration', 'central', 'unassigned']);
   assert.equal(DEFAULT_VERTICAL, 'unassigned');
   assert.equal(verticalLabel('brand_collaboration'), 'Brand Collaboration');
 });
