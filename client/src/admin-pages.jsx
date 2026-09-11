@@ -100,14 +100,20 @@ export function AdminDashboard() {
   </AdminFrame>;
 }
 
-function AddUserModal({ roles, workspaces, onClose, onCreated }) {
-  const [form, setForm] = useState({ firstName: '', lastName: '', email: '', phone: '', roleId: '', workspaceId: '' });
+function AddUserModal({ roles, workspaces, verticals, onClose, onCreated }) {
+  const [form, setForm] = useState({ firstName: '', lastName: '', email: '', phone: '', roleId: '', workspaceId: '', verticals: ['unassigned'] });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(() => { if (!form.roleId && roles.length) setForm(current => ({ ...current, roleId: roles.find(role => role.key === 'editor')?._id || roles[0]._id })); }, [roles]);
 
+  const toggleVertical = key => setForm(current => ({
+    ...current,
+    verticals: current.verticals.includes(key) ? current.verticals.filter(value => value !== key) : [...current.verticals, key],
+  }));
+
   const submit = async event => {
     event.preventDefault();
+    if (!form.verticals.length) return setError('Choose at least one vertical.');
     setBusy(true); setError('');
     try {
       const { data } = await api.post('/admin/users', { ...form, workspaceId: form.workspaceId || undefined, phone: form.phone || undefined });
@@ -133,12 +139,21 @@ function AddUserModal({ roles, workspaces, onClose, onCreated }) {
             {roles.filter(role => role.assignable).map(role => <option key={role._id} value={role._id}>{role.name}</option>)}
           </select>
         </label>
+        <fieldset className="field-label sm:col-span-2">Verticals
+          <div className="mt-1 grid gap-x-4 gap-y-2 sm:grid-cols-2">
+            {verticals.map(vertical => <label key={vertical.key} className="flex items-center gap-2 text-sm font-normal">
+              <input type="checkbox" className="w-auto" checked={form.verticals.includes(vertical.key)} onChange={() => toggleVertical(vertical.key)} />
+              {vertical.label}
+            </label>)}
+          </div>
+        </fieldset>
         <label className="field-label sm:col-span-2">Team / workspace
           <select value={form.workspaceId} onChange={event => setForm({ ...form, workspaceId: event.target.value })}>
             <option value="">Same as mine</option>
             {workspaces.map(workspace => <option key={workspace._id} value={workspace._id}>{workspace.name}</option>)}
           </select>
         </label>
+        <p className="text-xs text-slate-500 sm:col-span-2">Verticals decide which documents they can open: they see every document in the ones ticked above, and nothing outside them.</p>
       </div>
       <div className="mt-6 flex justify-end gap-2">
         <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
@@ -154,7 +169,8 @@ export function UsersPage() {
   const [users, setUsers] = useState([]);
   const [roles, setRoles] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);
-  const [filters, setFilters] = useState({ q: '', status: '', roleId: '', workspaceId: '' });
+  const [verticals, setVerticals] = useState([]);
+  const [filters, setFilters] = useState({ q: '', status: '', roleId: '', workspaceId: '', vertical: '' });
   const [busy, setBusy] = useState(true);
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState('');
@@ -174,6 +190,7 @@ export function UsersPage() {
   useEffect(() => {
     api.get('/admin/roles').then(({ data }) => setRoles(data)).catch(() => {});
     api.get('/admin/workspaces').then(({ data }) => setWorkspaces(data)).catch(() => {});
+    api.get('/admin/verticals').then(({ data }) => setVerticals(data)).catch(() => {});
   }, []);
 
   const act = async (user, action, label) => {
@@ -209,6 +226,10 @@ export function UsersPage() {
           <option value="">All statuses</option>
           {['active', 'invited', 'inactive', 'suspended'].map(status => <option key={status} value={status}>{status}</option>)}
         </select>
+        <select value={filters.vertical} onChange={event => setFilters({ ...filters, vertical: event.target.value })}>
+          <option value="">All verticals</option>
+          {verticals.map(vertical => <option key={vertical.key} value={vertical.key}>{vertical.label}</option>)}
+        </select>
         <select value={filters.workspaceId} onChange={event => setFilters({ ...filters, workspaceId: event.target.value })}>
           <option value="">All teams</option>
           {workspaces.map(workspace => <option key={workspace._id} value={workspace._id}>{workspace.name}</option>)}
@@ -216,10 +237,10 @@ export function UsersPage() {
       </div>
       <div className="overflow-x-auto">
         <table>
-          <thead><tr><th>Name</th><th>Role</th><th>Team</th><th>Status</th><th>Last login</th><th>Created</th><th /></tr></thead>
+          <thead><tr><th>Name</th><th>Role</th><th>Vertical</th><th>Team</th><th>Status</th><th>Last login</th><th>Created</th><th /></tr></thead>
           <tbody>
-            {busy ? <tr><td colSpan="7" className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600" /></td></tr>
-              : users.length === 0 ? <tr><td colSpan="7" className="py-16 text-center text-slate-500">No users match these filters.</td></tr>
+            {busy ? <tr><td colSpan="8" className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600" /></td></tr>
+              : users.length === 0 ? <tr><td colSpan="8" className="py-16 text-center text-slate-500">No users match these filters.</td></tr>
                 : users.map(user => <tr key={user.id}>
                   <td>
                     <button className="flex items-center gap-3 text-left" onClick={() => navigate(`/admin/users/${user.id}`)}>
@@ -228,6 +249,7 @@ export function UsersPage() {
                     </button>
                   </td>
                   <td>{user.role?.name || '—'}</td>
+                  <td>{user.verticalLabels?.join(', ') || '—'}</td>
                   <td>{user.workspace?.name || '—'}</td>
                   <td><span className={`status ${STATUS_STYLE[user.status] || ''}`}>{user.status}</span></td>
                   <td>{user.lastLoginAt ? timeAgo(user.lastLoginAt) : 'never'}</td>
@@ -252,7 +274,7 @@ export function UsersPage() {
         </table>
       </div>
     </div>
-    {adding && <AddUserModal roles={roles} workspaces={workspaces} onClose={() => setAdding(false)} onCreated={user => { setAdding(false); setMessage(`Invitation sent to ${user.email}.`); load(); }} />}
+    {adding && <AddUserModal roles={roles} workspaces={workspaces} verticals={verticals} onClose={() => setAdding(false)} onCreated={user => { setAdding(false); setMessage(`Invitation sent to ${user.email}.`); load(); }} />}
   </AdminFrame>;
 }
 
@@ -263,11 +285,12 @@ export function UserDetailPage() {
   const [detail, setDetail] = useState(null);
   const [roles, setRoles] = useState([]);
   const [workspaces, setWorkspaces] = useState([]);
+  const [verticals, setVerticals] = useState([]);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const load = useCallback(() => api.get(`/admin/users/${id}`).then(({ data }) => setDetail(data)).catch(failure => setError(errorText(failure))), [id]);
-  useEffect(() => { load(); api.get('/admin/roles').then(({ data }) => setRoles(data)).catch(() => {}); api.get('/admin/workspaces').then(({ data }) => setWorkspaces(data)).catch(() => {}); }, [load]);
+  useEffect(() => { load(); api.get('/admin/roles').then(({ data }) => setRoles(data)).catch(() => {}); api.get('/admin/workspaces').then(({ data }) => setWorkspaces(data)).catch(() => {}); api.get('/admin/verticals').then(({ data }) => setVerticals(data)).catch(() => {}); }, [load]);
 
   const update = async changes => {
     setError(''); setMessage('');
@@ -297,6 +320,23 @@ export function UserDetailPage() {
                 {roles.filter(role => role.assignable).map(role => <option key={role._id} value={role._id}>{role.name}</option>)}
               </select>
               : user.role?.name}</dd></div>
+            <div><dt>Verticals</dt><dd>{auth.can('users.edit')
+              ? <div className="grid gap-1">
+                {verticals.map(vertical => <label key={vertical.key} className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" className="w-auto" checked={(user.verticals || []).includes(vertical.key)}
+                    onChange={event => {
+                      const next = event.target.checked
+                        ? [...(user.verticals || []), vertical.key]
+                        : (user.verticals || []).filter(value => value !== vertical.key);
+                      // The server refuses an empty set, so say so here rather
+                      // than letting the last tick fail on the round trip.
+                      if (!next.length) { setError('A user must keep at least one vertical.'); return; }
+                      update({ verticals: next });
+                    }} />
+                  {vertical.label}
+                </label>)}
+              </div>
+              : user.verticalLabels?.join(', ') || '—'}</dd></div>
             <div><dt>Team</dt><dd>{auth.can('users.edit')
               ? <select value={user.workspace?.id || ''} onChange={event => update({ workspaceId: event.target.value || null })}>
                 <option value="">No team</option>

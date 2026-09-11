@@ -60,19 +60,28 @@ function Shell({ children }) {
   </div>;
 }
 
+// The catalogue is only fetched for administrators, so fall back to the raw
+// key rather than showing an empty cell to everyone else.
+const verticalLabel = (verticals, key) => verticals.find(vertical => vertical.key === key)?.label || (key === 'unassigned' || !key ? 'Unassigned' : key);
+
 function Dashboard() {
   const auth = useAuth();
   const navigate = useNavigate();
   const uploadRef = useRef();
   const [docs, setDocs] = useState([]);
-  const [filters, setFilters] = useState({ status: '', q: '', ownerId: '', workspaceId: '' });
+  const [filters, setFilters] = useState({ status: '', q: '', ownerId: '', workspaceId: '', vertical: '' });
   const [people, setPeople] = useState([]);
   const [teams, setTeams] = useState([]);
+  const [verticals, setVerticals] = useState([]);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
 
   // Only someone who can see the whole organisation gets the user/team filters.
   const orgWide = auth.can('documents.view_all');
+  // The verticals this account can reach, and the one a new upload lands in.
+  const mine = auth.user?.verticals || [];
+  const [target, setTarget] = useState(mine[0] || 'unassigned');
+  useEffect(() => { if (mine.length && !mine.includes(target)) setTarget(mine[0]); }, [mine.join(',')]);
 
   const load = async () => {
     setBusy(true);
@@ -82,12 +91,14 @@ function Dashboard() {
       setDocs(data);
     } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
   };
-  useEffect(() => { load(); }, [filters.status, filters.ownerId, filters.workspaceId]);
+  useEffect(() => { load(); }, [filters.status, filters.ownerId, filters.workspaceId, filters.vertical]);
   useEffect(() => {
     if (!orgWide || !auth.can('users.view')) return;
     api.get('/admin/users', { params: { limit: 200 } }).then(({ data }) => setPeople(data.users)).catch(() => {});
     api.get('/admin/workspaces').then(({ data }) => setTeams(data)).catch(() => {});
   }, [orgWide]);
+  // Needed by the upload picker too, so it is not tied to the admin filters.
+  useEffect(() => { api.get('/admin/verticals').then(({ data }) => setVerticals(data)).catch(() => {}); }, []);
 
   const upload = async event => {
     const file = event.target.files?.[0];
@@ -95,8 +106,12 @@ function Dashboard() {
     setBusy(true);
     const body = new FormData();
     body.append('pdf', file);
+    // Only meaningful when the author can reach more than one; the server falls
+    // back to their primary vertical for anything they are not entitled to.
+    if (mine.length > 1) body.append('vertical', target);
     try { const { data } = await api.post('/sign/upload', body); navigate(`/documents/${data._id}/design`); }
     catch (failure) { setError(errorText(failure)); setBusy(false); }
+    finally { event.target.value = ''; }
   };
   const download = async doc => {
     try {
@@ -123,12 +138,17 @@ function Dashboard() {
       <div>
         <p className="eyebrow">Documents</p>
         <h1 className="text-3xl font-semibold tracking-tight">{orgWide ? 'All documents' : 'My documents'}</h1>
-        <p className="mt-2 text-slate-500">{orgWide ? 'Every signature request in your organisation.' : 'Documents you own or that were shared with you.'}</p>
+        <p className="mt-2 text-slate-500">{orgWide ? 'Every signature request in your organisation.' : `Every signature request in ${mine.length > 1 ? 'your verticals' : 'the ' + (auth.user?.verticalLabels?.[0] || 'your') + ' vertical'}: ${auth.user?.verticalLabels?.join(', ') || '—'}.`}</p>
       </div>
-      {auth.can('documents.create') && <>
+      {auth.can('documents.create') && <div className="flex flex-wrap items-end gap-2">
+        {mine.length > 1 && <label className="field-label mt-0">Upload into
+          <select value={target} onChange={event => setTarget(event.target.value)}>
+            {mine.map(key => <option key={key} value={key}>{verticalLabel(verticals, key)}</option>)}
+          </select>
+        </label>}
         <button onClick={() => uploadRef.current.click()} className="primary-button"><Upload size={17} />Upload PDF</button>
         <input ref={uploadRef} hidden type="file" accept="application/pdf,.pdf" onChange={upload} />
-      </>}
+      </div>}
     </div>
 
     <div className="mt-8 grid gap-4 sm:grid-cols-3">
@@ -152,6 +172,10 @@ function Dashboard() {
           <option value="">All users</option>
           {people.map(person => <option key={person.id} value={person.id}>{person.fullName}</option>)}
         </select>}
+        {orgWide && verticals.length > 0 && <select value={filters.vertical} onChange={event => setFilters({ ...filters, vertical: event.target.value })}>
+          <option value="">All verticals</option>
+          {verticals.map(vertical => <option key={vertical.key} value={vertical.key}>{vertical.label}</option>)}
+        </select>}
         {orgWide && teams.length > 0 && <select value={filters.workspaceId} onChange={event => setFilters({ ...filters, workspaceId: event.target.value })}>
           <option value="">All teams</option>
           {teams.map(team => <option key={team._id} value={team._id}>{team.name}</option>)}
@@ -165,13 +189,14 @@ function Dashboard() {
       </div>
       <div className="overflow-x-auto">
         <table>
-          <thead><tr><th>Document</th><th>Created by</th><th>Signers</th><th>Status</th><th>Valid until</th><th>Updated</th><th /></tr></thead>
+          <thead><tr><th>Document</th><th>Created by</th><th>Vertical</th><th>Signers</th><th>Status</th><th>Valid until</th><th>Updated</th><th /></tr></thead>
           <tbody>
-            {busy ? <tr><td colSpan="7" className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600" /></td></tr>
-              : docs.length === 0 ? <tr><td colSpan="7" className="py-16 text-center text-slate-500">No documents here yet.</td></tr>
+            {busy ? <tr><td colSpan="8" className="py-16 text-center"><Loader2 className="mx-auto animate-spin text-brand-600" /></td></tr>
+              : docs.length === 0 ? <tr><td colSpan="8" className="py-16 text-center text-slate-500">No documents here yet.</td></tr>
                 : docs.map(doc => <tr key={doc._id}>
                   <td><b>{doc.title}</b><small className="block text-slate-500">{doc.referenceNumber}</small></td>
                   <td>{doc.owner?.fullName || doc.createdBy}<small className="block text-slate-500">{doc.sentAt ? `Sent ${formatDate(doc.sentAt)}` : `Created ${formatDate(doc.createdAt)}`}</small></td>
+                  <td>{verticalLabel(verticals, doc.vertical)}</td>
                   <td>{doc.signers?.length ? `${doc.signers.length} · ${doc.signers[0].name}` : 'Not assigned'}</td>
                   <td><span className={`status status-${doc.status.toLowerCase().replaceAll(' ', '-')}`}>{doc.status}</span></td>
                   <td>{doc.expiresAt ? formatDate(doc.expiresAt) : '—'}</td>
@@ -247,9 +272,10 @@ function FieldInput({field,value,onChange}) {
 function SignatureModal({title,onClose,onApply}) { const canvas=useRef(),[tab,setTab]=useState('draw'),[typed,setTyped]=useState(''),[upload,setUpload]=useState(''); useEffect(()=>{if(tab!=='draw'||!canvas.current)return;const c=canvas.current,ctx=c.getContext('2d');ctx.lineWidth=3;ctx.lineCap='round';ctx.strokeStyle='#0f172a';let drawing=false;const point=e=>{const r=c.getBoundingClientRect();return[(e.clientX-r.left)*c.width/r.width,(e.clientY-r.top)*c.height/r.height]};const down=e=>{drawing=true;ctx.beginPath();ctx.moveTo(...point(e));c.setPointerCapture(e.pointerId)};const move=e=>{if(drawing){ctx.lineTo(...point(e));ctx.stroke()}};const up=()=>drawing=false;c.addEventListener('pointerdown',down);c.addEventListener('pointermove',move);c.addEventListener('pointerup',up);return()=>{c.removeEventListener('pointerdown',down);c.removeEventListener('pointermove',move);c.removeEventListener('pointerup',up)}},[tab]);const typedImage=()=>{const c=document.createElement('canvas');c.width=700;c.height=180;const x=c.getContext('2d');x.font='italic 64px cursive';x.fillStyle='#0f172a';x.textAlign='center';x.textBaseline='middle';x.fillText(typed,350,90);return c.toDataURL('image/png')};const apply=()=>{const value=tab==='draw'?canvas.current?.toDataURL('image/png'):tab==='type'&&typed?typedImage():upload;if(value)onApply(value)};return <div className="modal-backdrop"><div className="modal max-w-xl"><div className="flex justify-between"><div><p className="eyebrow">Add your {title}</p><h2 className="text-xl font-semibold capitalize">Create {title}</h2></div><button onClick={onClose}><X/></button></div><div className="mt-5 flex gap-1 rounded-xl bg-slate-100 p-1">{['draw','type','upload'].map(t=><button key={t} onClick={()=>setTab(t)} className={`flex-1 rounded-lg px-3 py-2 text-sm capitalize ${tab===t?'bg-white font-semibold shadow-sm':''}`}>{t}</button>)}</div><div className="mt-4 h-52 rounded-xl border bg-slate-50">{tab==='draw'&&<canvas ref={canvas} width="700" height="250" className="h-full w-full touch-none"/>}{tab==='type'&&<div className="grid h-full place-items-center p-5"><input className="w-full text-center font-serif text-3xl italic" placeholder="Type your full name" value={typed} onChange={e=>setTyped(e.target.value)}/></div>}{tab==='upload'&&<div className="grid h-full place-items-center p-5"><label className="secondary-button cursor-pointer"><Upload size={17}/>Choose PNG or JPG<input hidden type="file" accept="image/png,image/jpeg" onChange={e=>{const f=e.target.files?.[0];if(!f||f.size>2*1024*1024)return;const r=new FileReader();r.onload=()=>setUpload(r.result);r.readAsDataURL(f)}}/></label>{upload&&<img className="max-h-24 max-w-full" src={upload}/>}</div>}</div><div className="mt-5 flex justify-between"><button className="secondary-button" onClick={()=>{if(canvas.current)canvas.current.getContext('2d').clearRect(0,0,canvas.current.width,canvas.current.height);setTyped('');setUpload('')}}>Clear</button><div className="flex gap-2"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button capitalize" onClick={apply}>Apply {title}</button></div></div></div></div>}
 
 // Internal sharing: give a colleague view or edit access to one document.
-function ShareModal({ documentId, onClose }) {
+function ShareModal({ documentId, doc, canMoveVertical, onClose, onMoved }) {
   const [members, setMembers] = useState([]);
   const [people, setPeople] = useState([]);
+  const [verticals, setVerticals] = useState([]);
   const [form, setForm] = useState({ userId: '', permission: 'view' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -259,6 +285,15 @@ function ShareModal({ documentId, onClose }) {
     api.get(`/sign/${documentId}/shareable-users`).then(({ data }) => setPeople(data)).catch(() => {});
   }, [documentId]);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { if (canMoveVertical) api.get('/admin/verticals').then(({ data }) => setVerticals(data)).catch(() => {}); }, [canMoveVertical]);
+
+  // Moving the document hands it to a different audience entirely, so the
+  // colleague list below is reloaded against the new vertical.
+  const move = async vertical => {
+    setError('');
+    try { await api.patch(`/sign/${documentId}/vertical`, { vertical }); onMoved?.(vertical); load(); }
+    catch (failure) { setError(errorText(failure)); }
+  };
 
   const share = async () => {
     if (!form.userId) return;
@@ -278,8 +313,14 @@ function ShareModal({ documentId, onClose }) {
         <div><p className="eyebrow">Access</p><h2 className="text-xl font-semibold">Share this document</h2></div>
         <button onClick={onClose}><X /></button>
       </div>
-      <p className="mt-2 text-sm text-slate-500">Colleagues you add here can open the document. Editors can also change it.</p>
+      <p className="mt-2 text-sm text-slate-500">Everyone in the {verticalLabel(verticals, doc?.vertical)} vertical can open this document. Colleagues you add here can also change it.</p>
       {error && <div className="error-box">{error}</div>}
+      {canMoveVertical && <label className="field-label">Vertical
+        <select value={doc?.vertical || 'unassigned'} onChange={event => move(event.target.value)}>
+          {verticals.map(vertical => <option key={vertical.key} value={vertical.key}>{vertical.label}</option>)}
+        </select>
+        <small className="text-slate-500">Moving the document changes who can see it.</small>
+      </label>}
       <div className="mt-4 flex flex-wrap items-end gap-2">
         <label className="field-label mt-0 min-w-48 flex-1">Colleague
           <select value={form.userId} onChange={event => setForm({ ...form, userId: event.target.value })}>
@@ -302,7 +343,7 @@ function ShareModal({ documentId, onClose }) {
           <span className="chip">{member.permission === 'edit' ? 'Editor' : 'Viewer'}</span>
           <button className="icon-button text-red-600" title="Remove access" onClick={() => revoke(member.userId)}><Trash2 size={16} /></button>
         </div>)}
-        {!members.length && <p className="py-3 text-sm text-slate-500">Only you and administrators can see this document.</p>}
+        {!members.length && <p className="py-3 text-sm text-slate-500">Nobody has been given edit access yet.</p>}
       </div>
     </div>
   </div>;
@@ -370,7 +411,7 @@ function Designer() {
   if(doc?.status==='Signed')return <SignedDocumentView doc={doc}/>;
   return <Shell><div className="designer"><aside className="designer-sidebar"><div className="sidebar-section"><div className="section-heading"><h2>Documents</h2><button onClick={()=>navigate('/')}>Back</button></div><div className="document-chip"><FileText size={17}/><span>{doc?.title}</span><MoreVertical className="ml-auto" size={17}/></div></div><div className="sidebar-section p-0"><div className="section-heading px-3 pt-4"><h2>Signers</h2>{access.canEdit&&<button onClick={addSigner}>Add</button>}</div><div>{signers.map((s,i)=><div role="button" tabIndex="0" onClick={()=>setActiveSigner(s._id)} className={`signer-row ${String(activeSigner)===String(s._id)?'active':''}`} key={s._id}><span className="signer-dot" style={{background:fieldColors[i%fieldColors.length]}}/><div><b>{s.name}{s.isFinalApprover&&<span className="approver-badge" title="Signs last, after everyone else"><ShieldCheck size={11}/>Final</span>}</b><small>{s.email}</small></div><button className="signer-edit" title="Edit signer" onClick={e=>{e.stopPropagation();setSignerModal({...s})}}><PenLine size={15}/></button><b className="signer-count" style={{background:`${fieldColors[i%fieldColors.length]}20`,color:fieldColors[i%fieldColors.length]}}>{fields.filter(f=>String(f.signerId)===String(s._id)).length}</b><MoreVertical size={17}/></div>)}</div></div>{!access.canEdit&&<div className="sidebar-section"><div className="rounded-xl bg-slate-100 p-3 text-xs text-slate-600">You have read-only access to this document.</div></div>}{access.canEdit&&<div className="sidebar-section"><div className="section-heading"><h2>Fields</h2><span>Drag or click</span></div><div className="field-grid signer-palette" style={{'--signer-color':fieldColors[Math.max(0,signers.findIndex(s=>String(s._id)===String(activeSigner)))%fieldColors.length]}}>{fieldTypes.map(type=>{const Icon=fieldIcons[type]||Type;return <button draggable onClick={()=>addField(type,currentPage,.62,.72)} onDragStart={e=>e.dataTransfer.setData('fieldType',type)} key={type}><Icon size={16}/><span>{type}</span></button>})}<button className="col-span-2" onClick={()=>addField('text',currentPage,.62,.72)}><Plus size={17}/>Add Field</button></div></div>}</aside>
   <main className="designer-main"><div className="designer-toolbar"><div><p className="text-xs text-slate-500">{doc?.referenceNumber}</p><h1 className="font-semibold">{doc?.title} {access.canEdit&&(dirty?<span className="ml-2 text-xs font-normal text-amber-600">Saving…</span>:<span className="ml-2 text-xs font-normal text-emerald-600">Saved</span>)}</h1></div><div className="flex gap-2"><button className="secondary-button" onClick={()=>setHistory(!history)}><Activity size={16}/>History</button>{access.canShare&&<button className="secondary-button" onClick={()=>setSharing(true)}><Share2 size={16}/>Share</button>}{access.canEdit&&<button disabled={busy||!dirty} onClick={save} className="secondary-button">{busy&&<Loader2 size={15} className="animate-spin"/>}Save</button>}{access.canSend&&<button onClick={()=>setSendOpen(true)} className="primary-button"><Send size={16}/>Send</button>}</div></div><div className="pdf-toolbar"><button onClick={()=>goPage(currentPage-1)}><ChevronLeft size={17}/></button><input value={currentPage} onChange={e=>goPage(Number(e.target.value)||1)}/><span>of {doc?.pageCount||1}</span><i/><button onClick={()=>setZoom(Math.max(.6,zoom-.1))}><Minus size={17}/></button><select value={zoom} onChange={e=>setZoom(Number(e.target.value))}><option value="0.75">75%</option><option value="1">100%</option><option value="1.25">125%</option><option value="1.5">150%</option></select><button onClick={()=>setZoom(Math.min(1.8,zoom+.1))}><Plus size={17}/></button><button onClick={()=>goPage(currentPage+1)}><ChevronRight size={17}/></button></div>{error&&<div className="error-box mx-auto max-w-2xl">{error}</div>}<div className="pdf-stage p-6" style={{width:`${Math.max(760,850*zoom)}px`}}><PdfPages url={`/api/sign/${id}/pdf`} fields={fields} selected={selected} zoom={zoom} onPages={setPageMetrics} onDrop={access.canEdit?addField:undefined} onFieldChange={access.canEdit?updateField:undefined} onFieldContext={access.canEdit?((f,rect)=>setProperties({fieldId:f._id,rect})):undefined} onFieldClick={f=>{setSelected(f._id);setCurrentPage(f.pageNumber);setProperties(null)}}/></div></main>
-  {signerModal&&<SignerModal signer={signerModal} onClose={()=>setSignerModal(null)} onSave={saveSigner}/>} {sharing&&<ShareModal documentId={id} onClose={()=>setSharing(false)}/>}{history&&<HistoryPanel documentId={id} onClose={()=>setHistory(false)}/>}{properties&&(()=>{const f=fields.find(x=>x._id===properties.fieldId);if(!f)return null;return <FieldPropertiesPopover
+  {signerModal&&<SignerModal signer={signerModal} onClose={()=>setSignerModal(null)} onSave={saveSigner}/>} {sharing&&<ShareModal documentId={id} doc={doc} canMoveVertical={access.canMoveVertical} onMoved={vertical=>setDoc(current=>current?{...current,vertical}:current)} onClose={()=>setSharing(false)}/>}{history&&<HistoryPanel documentId={id} onClose={()=>setHistory(false)}/>}{properties&&(()=>{const f=fields.find(x=>x._id===properties.fieldId);if(!f)return null;return <FieldPropertiesPopover
     field={f} anchor={properties.rect} page={pageMetrics.find(m=>m.number===f.pageNumber)||pageMetrics[0]||FALLBACK_PAGE}
     onChange={changes=>updateField(f._id,changes)}
     onDuplicate={()=>{const copy=duplicateField(f._id);if(copy)setProperties(null)}}

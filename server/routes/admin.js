@@ -20,6 +20,7 @@ const { sendEmail } = require('../services/email');
 const { buildTransport, invalidateMailer, loadSetting, fromHeader } = require('../config/mailer');
 const { encryptSecret, decryptSecret } = require('../utils/secretBox');
 const { PERMISSIONS, PERMISSION_KEYS, hasPermission } = require('../config/permissions');
+const { VERTICAL_KEYS, DEFAULT_VERTICAL, verticalLabels, normaliseVerticals, verticalOptions } = require('../config/verticals');
 
 const router = express.Router();
 router.use(authenticate);
@@ -77,6 +78,7 @@ const userSummary = (user, role, workspace) => ({
   email: user.email, phone: user.phone, status: user.status, emailVerified: user.emailVerified,
   role: role ? { id: role._id, key: role.key, name: role.name, rank: role.rank } : null,
   workspace: workspace ? { id: workspace._id, name: workspace.name } : null,
+  verticals: normaliseVerticals(user.verticals), verticalLabels: verticalLabels(user.verticals),
   lastLoginAt: user.lastLoginAt, lastActivityAt: user.lastActivityAt, lastLoginIp: user.lastLoginIp,
   createdAt: user.createdAt, invitedAt: user.invitedAt, passwordChangedAt: user.passwordChangedAt,
   lockedUntil: user.lockedUntil,
@@ -100,6 +102,7 @@ router.get('/users', permit('users.view'), async (req, res, next) => {
     if (req.query.status) filter.status = req.query.status;
     if (req.query.roleId) filter.roleId = req.query.roleId;
     if (req.query.workspaceId) filter.workspaceId = req.query.workspaceId;
+    if (req.query.vertical) filter.verticals = req.query.vertical;
     if (req.query.lastLoginBefore) filter.$or = [{ lastLoginAt: { $lt: new Date(req.query.lastLoginBefore) } }, { lastLoginAt: null }];
     if (req.query.q) {
       const term = new RegExp(String(req.query.q).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -121,6 +124,7 @@ router.post('/users', permit('users.create'), validate(z.object({
   phone: z.string().trim().optional(),
   roleId: objectId,
   workspaceId: objectId.optional(),
+  verticals: z.array(z.enum(VERTICAL_KEYS)).min(1, 'Choose at least one vertical.').optional().default([DEFAULT_VERTICAL]),
   status: z.enum(['invited', 'active']).optional().default('invited'),
 })), async (req, res, next) => {
   try {
@@ -134,6 +138,7 @@ router.post('/users', permit('users.create'), validate(z.object({
     const user = await User.create({
       ...scope(req),
       workspaceId: req.body.workspaceId || req.user.workspaceId,
+      verticals: normaliseVerticals(req.body.verticals),
       roleId: role._id,
       firstName: req.body.firstName, lastName: req.body.lastName, email: req.body.email, phone: req.body.phone,
       status: 'invited', invitedAt: new Date(), createdBy: req.user._id,
@@ -146,7 +151,7 @@ router.post('/users', permit('users.create'), validate(z.object({
       variables: { firstName: user.firstName, email: user.email, inviteUrl, expiresInDays: INVITE_TOKEN_DAYS, invitedByName: req.user.fullName, companyName: company?.name || 'Yanisa', roleName: role.name },
       context: { companyId: user.companyId, actorUserId: req.user._id },
     });
-    await logAuditEvent({ req, action: 'user.created', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} invited ${user.email} as ${role.name}`, after: { email: user.email, role: role.key, status: user.status, workspaceId: user.workspaceId } });
+    await logAuditEvent({ req, action: 'user.created', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} invited ${user.email} as ${role.name}`, after: { email: user.email, role: role.key, status: user.status, workspaceId: user.workspaceId, verticals: user.verticals } });
     const [summary] = await decorate(req, [user.toObject()]);
     return res.status(201).json(summary);
   } catch (err) { return next(err); }
@@ -180,12 +185,13 @@ router.patch('/users/:id', permit('users.edit'), validate(z.object({
   phone: z.string().trim().optional(),
   roleId: objectId.optional(),
   workspaceId: objectId.nullable().optional(),
+  verticals: z.array(z.enum(VERTICAL_KEYS)).min(1, 'Choose at least one vertical.').optional(),
 })), async (req, res, next) => {
   try {
     const { user, role, error, status } = await loadManageableUser(req, req.params.id);
     if (error) return res.status(status).json({ error });
 
-    const before = { firstName: user.firstName, lastName: user.lastName, phone: user.phone, roleId: String(user.roleId), workspaceId: user.workspaceId ? String(user.workspaceId) : null };
+    const before = { firstName: user.firstName, lastName: user.lastName, phone: user.phone, roleId: String(user.roleId), workspaceId: user.workspaceId ? String(user.workspaceId) : null, verticals: normaliseVerticals(user.verticals).join(', ') };
     let nextRole = role;
     if (req.body.roleId && String(req.body.roleId) !== String(user.roleId)) {
       if (isSelf(req, user._id)) return res.status(400).json({ error: 'You cannot change your own role.' });
@@ -204,10 +210,16 @@ router.patch('/users/:id', permit('users.edit'), validate(z.object({
       if (req.body.workspaceId && !(await Workspace.findOne({ _id: req.body.workspaceId, ...scope(req) }))) return res.status(400).json({ error: 'That workspace does not exist.' });
       user.workspaceId = req.body.workspaceId || undefined;
     }
+    if (req.body.verticals !== undefined) user.verticals = normaliseVerticals(req.body.verticals);
     user.updatedBy = req.user._id;
     await user.save();
 
-    const after = { firstName: user.firstName, lastName: user.lastName, phone: user.phone, roleId: String(user.roleId), workspaceId: user.workspaceId ? String(user.workspaceId) : null };
+    const after = { firstName: user.firstName, lastName: user.lastName, phone: user.phone, roleId: String(user.roleId), workspaceId: user.workspaceId ? String(user.workspaceId) : null, verticals: normaliseVerticals(user.verticals).join(', ') };
+    // A vertical move changes which documents the account can reach at all, so
+    // it is recorded on its own rather than buried in the generic update.
+    if (before.verticals !== after.verticals) {
+      await logAuditEvent({ req, action: 'user.verticals_changed', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} changed the verticals of ${user.email} from ${verticalLabels(before.verticals.split(', ')).join(', ')} to ${verticalLabels(after.verticals.split(', ')).join(', ')}`, before: { verticals: before.verticals }, after: { verticals: after.verticals } });
+    }
     if (before.roleId !== after.roleId) {
       await logAuditEvent({ req, action: 'user.role_changed', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} changed the role of ${user.email} from ${role?.name} to ${nextRole?.name}`, before: { role: role?.key }, after: { role: nextRole?.key } });
       await Session.updateMany({ userId: user._id, revokedAt: null }, { revokedAt: new Date(), revokedBy: req.user._id, revokedReason: 'role_changed' });
@@ -324,6 +336,10 @@ router.delete('/users/:id', permit('users.delete'), async (req, res, next) => {
 // --------------------------------------------------------------- roles
 
 router.get('/permissions', permit('roles.view'), (req, res) => res.json(PERMISSIONS.map(([key, description]) => ({ key, description, module: key.split('.')[0] }))));
+
+// The catalogue itself is not sensitive and every screen that assigns a user
+// or filters documents needs it, so any signed-in account may read it.
+router.get('/verticals', (req, res) => res.json(verticalOptions()));
 
 router.get('/roles', async (req, res, next) => {
   try {

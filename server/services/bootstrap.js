@@ -5,6 +5,7 @@ const User = require('../models/User');
 const SignDocument = require('../models/SignDocument');
 const MailSetting = require('../models/MailSetting');
 const { SYSTEM_ROLES } = require('../config/permissions');
+const { DEFAULT_VERTICAL } = require('../config/verticals');
 const { hashPassword } = require('./tokens');
 const { encryptSecret } = require('../utils/secretBox');
 
@@ -62,6 +63,8 @@ async function bootstrap() {
     console.log(`Bootstrap super admin created: ${adminEmail}`);
   }
 
+  await adoptVerticals();
+
   const owner = admin || await User.findOne({ companyId: company._id, status: 'active' }).sort({ createdAt: 1 });
   const orphaned = await SignDocument.countDocuments({ companyId: { $in: [null, undefined] } });
   if (orphaned && owner) {
@@ -73,6 +76,30 @@ async function bootstrap() {
   }
 
   return { company, workspace, admin };
+}
+
+/**
+ * Users and documents that predate verticals carry none at all, and users from
+ * the single-vertical release carry `vertical` rather than `verticals`. Both
+ * are brought up to date so the boundary has something concrete to compare and
+ * nobody is stranded outside every pool; an administrator then sorts them into
+ * the real business lines.
+ */
+async function adoptVerticals() {
+  // Carried over one at a time: $rename would not work here, since the old
+  // field held a string and the new one holds an array.
+  const singular = await User.find({ verticals: { $in: [null, undefined] }, vertical: { $exists: true, $ne: null } }).select('vertical').lean();
+  for (const user of singular) {
+    await User.updateOne({ _id: user._id }, { $set: { verticals: [user.vertical] }, $unset: { vertical: '' } });
+  }
+
+  const [users, documents] = await Promise.all([
+    User.updateMany({ $or: [{ verticals: { $in: [null, undefined] } }, { verticals: { $size: 0 } }] }, { $set: { verticals: [DEFAULT_VERTICAL] }, $unset: { vertical: '' } }),
+    SignDocument.updateMany({ vertical: { $in: [null, undefined] } }, { $set: { vertical: DEFAULT_VERTICAL } }),
+  ]);
+  if (singular.length) console.log(`Carried ${singular.length} user(s) over to multiple verticals`);
+  const total = (users.modifiedCount || 0) + (documents.modifiedCount || 0);
+  if (total) console.log(`Assigned ${users.modifiedCount || 0} user(s) and ${documents.modifiedCount || 0} document(s) to the "${DEFAULT_VERTICAL}" vertical`);
 }
 
 /**

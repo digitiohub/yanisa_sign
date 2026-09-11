@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { VERTICAL_KEYS, DEFAULT_VERTICAL } = require('../config/verticals');
 
 const signerSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
@@ -52,6 +53,9 @@ const schema = new mongoose.Schema({
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', index: true },
   workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  // Inherited from whoever uploaded the document; only an administrator who
+  // can see the whole organisation may move it to another vertical.
+  vertical: { type: String, enum: VERTICAL_KEYS, default: DEFAULT_VERTICAL, index: true },
   createdByUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   createdBy: { type: String, required: true },

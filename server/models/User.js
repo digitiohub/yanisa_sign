@@ -1,9 +1,13 @@
 const mongoose = require('mongoose');
+const { VERTICAL_KEYS, DEFAULT_VERTICAL } = require('../config/verticals');
 
 const schema = new mongoose.Schema({
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', required: true, index: true },
   workspaceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Workspace', index: true },
   roleId: { type: mongoose.Schema.Types.ObjectId, ref: 'Role', required: true, index: true },
+  // The business lines this person belongs to - one or several. Outside them
+  // they see nothing, so an administrator picks at least one when inviting.
+  verticals: { type: [{ type: String, enum: VERTICAL_KEYS }], default: () => [DEFAULT_VERTICAL], index: true },
 
   firstName: { type: String, required: true, trim: true },
   lastName: { type: String, default: '', trim: true },

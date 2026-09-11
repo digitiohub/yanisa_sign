@@ -6,7 +6,8 @@ const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
 const SignDocument = require('../models/SignDocument');
 const SignAccess = require('../models/SignAccess');
 const { authenticate, permit } = require('../middleware/auth');
-const { documentListFilter, documentAccess, requireDocument } = require('../services/access');
+const { documentListFilter, documentAccess, requireDocument, seesEveryVertical } = require('../services/access');
+const { VERTICAL_KEYS, verticalLabel, verticalFilter, normaliseVertical, normaliseVerticals, primaryVertical } = require('../config/verticals');
 const { logActivity, logAuditEvent } = require('../services/audit');
 const DocumentMember = require('../models/DocumentMember');
 const User = require('../models/User');
@@ -120,6 +121,9 @@ router.get('/', authenticate, permit('documents.view'), async (req, res, next) =
     if (req.query.status) query.status = req.query.status;
     if (req.query.ownerId) query.createdByUserId = req.query.ownerId;
     if (req.query.workspaceId) query.workspaceId = req.query.workspaceId;
+    // Administrators only: for anyone else documentListFilter has already pinned
+    // the vertical, and honouring the query string here would overwrite it.
+    if (req.query.vertical && VERTICAL_KEYS.includes(req.query.vertical) && seesEveryVertical(req.user)) Object.assign(query, verticalFilter([req.query.vertical]));
     if (req.query.from || req.query.to) { query.createdAt = {}; if (req.query.from) query.createdAt.$gte = new Date(req.query.from); if (req.query.to) query.createdAt.$lte = new Date(`${req.query.to}T23:59:59.999Z`); }
     if (req.query.q) query.$text = { $search: req.query.q };
     const docs = await SignDocument.find(query).select('-audits -fields.value').sort({ updatedAt: -1 }).limit(Math.min(Number(req.query.limit) || 200, 500)).lean();
@@ -129,12 +133,24 @@ router.get('/', authenticate, permit('documents.view'), async (req, res, next) =
   } catch (e) { next(e); }
 });
 
+/**
+ * Which vertical a new document lands in. Someone who can reach only one has no
+ * choice to make, so it simply inherits; someone with several may name one, and
+ * anything they are not entitled to falls back to their primary rather than
+ * being honoured.
+ */
+function uploadVertical(req) {
+  const reachable = normaliseVerticals(req.user.verticals);
+  const asked = String(req.body.vertical || '');
+  return reachable.includes(asked) ? asked : primaryVertical(reachable);
+}
+
 router.post('/upload', authenticate, permit('documents.create'), upload.single('pdf'), async (req, res, next) => {
   try {
     if (!req.file || req.file.buffer.subarray(0, 5).toString() !== '%PDF-') return res.status(400).json({ error: 'A valid PDF is required' });
     let pdf; try { pdf = await PDFDocument.load(req.file.buffer); } catch { return res.status(400).json({ error: 'The PDF is corrupt or unsupported' }); }
     const originalFile = await storage.save('originals', req.file.buffer);
-    const doc = await SignDocument.create({ referenceNumber: ref(), title: String(req.body.title || req.file.originalname.replace(/\.pdf$/i, '')).slice(0, 180), originalFile, originalHash: hash(req.file.buffer), pageCount: pdf.getPageCount(), companyId: req.user.companyId, workspaceId: req.user.workspaceId, ownerId: req.user._id, createdByUserId: req.user._id, createdBy: req.user.email, relatedEntityType: req.body.relatedEntityType, relatedEntityId: req.body.relatedEntityId, audits: [audit(req, 'document_uploaded', { filename: req.file.originalname, size: req.file.size })] });
+    const doc = await SignDocument.create({ referenceNumber: ref(), title: String(req.body.title || req.file.originalname.replace(/\.pdf$/i, '')).slice(0, 180), originalFile, originalHash: hash(req.file.buffer), pageCount: pdf.getPageCount(), companyId: req.user.companyId, workspaceId: req.user.workspaceId, vertical: uploadVertical(req), ownerId: req.user._id, createdByUserId: req.user._id, createdBy: req.user.email, relatedEntityType: req.body.relatedEntityType, relatedEntityId: req.body.relatedEntityId, audits: [audit(req, 'document_uploaded', { filename: req.file.originalname, size: req.file.size })] });
     await track(req, doc, 'document.created', `${req.user.fullName} uploaded "${doc.title}"`, { metadata: { filename: req.file.originalname, pages: doc.pageCount, reference: doc.referenceNumber } });
     res.status(201).json(doc);
   } catch (e) { next(e); }
@@ -234,6 +250,24 @@ router.post('/:id/send', authenticate, permit('documents.send'), guard('canSend'
 router.post('/:id/cancel', authenticate, permit('documents.send'), guard('canSend'), async (req, res, next) => { try { const doc = req.document; const before = doc.status; doc.status = 'Cancelled'; doc.cancelledAt = new Date(); doc.updatedBy = req.user._id; doc.audits.push(audit(req, 'request_cancelled')); await SignAccess.updateMany({ documentId: doc._id }, { revokedAt: new Date() }); await doc.save(); await track(req, doc, 'document.cancelled', `${req.user.fullName} cancelled "${doc.title}"`, { before: { status: before }, after: { status: 'Cancelled' } }); res.json({ ok: true }); } catch (e) { next(e); } });
 router.delete('/:id', authenticate, permit('documents.delete'), guard('canDelete'), async (req, res, next) => { try { const doc = req.document; await logAuditEvent({ req, action: 'document.deleted', entityType: 'document', entityId: doc._id, entityLabel: doc.title, documentId: doc._id, description: `${req.user.fullName} deleted "${doc.title}"`, before: { title: doc.title, reference: doc.referenceNumber, status: doc.status } }); await DocumentMember.deleteMany({ documentId: doc._id }); await Promise.all([doc.originalFile, doc.signedFile, doc.certificateFile].filter(Boolean).map(file=>fs.unlink(file).catch(()=>{})).concat([SignAccess.deleteMany({ documentId: doc._id }), doc.deleteOne()])); res.json({ ok: true }); } catch (e) { next(e); } });
 router.post('/:id/resend', authenticate, permit('documents.send'), guard('canSend'), async (req, res, next) => { try { const doc = req.document; if (!['Pending Signature','Viewed','Partially Signed','Expired'].includes(doc.status)) return res.status(409).json({ error: 'This request cannot be resent' }); const expiresAt = new Date(req.body.expiresAt || Date.now()+Number(process.env.DEFAULT_SIGN_VALID_DAYS||7)*86400000); await SignAccess.updateMany({ documentId: doc._id, revokedAt: null }, { revokedAt: new Date() }); for (const signer of doc.signers.filter(s=>s.status!=='completed')) { const token=crypto.randomBytes(32).toString('base64url'); await SignAccess.create({documentId:doc._id,signerId:signer._id,tokenHash:hash(token),expiresAt}); await mail.sendSignatureRequest({signer,document:doc,url:`${process.env.APP_URL||'http://localhost:5173'}/sign/request/${token}`}); } doc.expiresAt=expiresAt; doc.status='Pending Signature'; doc.audits.push(audit(req,'request_resent')); doc.updatedBy=req.user._id; await doc.save(); await track(req, doc, 'document.resent', `${req.user.fullName} resent "${doc.title}"`, { metadata: { expiresAt } }); res.json({ok:true}); } catch(e){next(e)} });
+// Moving a document changes who can see it at all, so it is limited to the
+// administrators who can already see every vertical (canMoveVertical).
+router.patch('/:id/vertical', authenticate, permit('documents.edit'), guard('canMoveVertical'), async (req, res, next) => {
+  try {
+    const vertical = String(req.body.vertical || '');
+    if (!VERTICAL_KEYS.includes(vertical)) return res.status(400).json({ error: 'That vertical does not exist.' });
+    const doc = req.document;
+    const before = normaliseVertical(doc.vertical);
+    if (before === vertical) return res.json({ ok: true, vertical });
+    doc.vertical = vertical;
+    doc.updatedBy = req.user._id;
+    doc.audits.push(audit(req, 'document_vertical_changed', { from: before, to: vertical }));
+    await doc.save();
+    await track(req, doc, 'document.vertical_changed', `${req.user.fullName} moved "${doc.title}" from the ${verticalLabel(before)} vertical to ${verticalLabel(vertical)}`, { before: { vertical: before }, after: { vertical } });
+    res.json({ ok: true, vertical });
+  } catch (e) { next(e); }
+});
+
 router.get('/:id/audit', authenticate, permit('documents.view'), guard(), async (req, res, next) => { try { const doc = await SignDocument.findById(req.params.id).select('referenceNumber title audits').lean(); res.json(doc); } catch (e) { next(e); } });
 
 async function accessFor(req, res) { const access = await SignAccess.findOne({ tokenHash: hash(req.params.token) }); if (!access) { res.status(404).json({ error: 'This signing link is invalid' }); return null; } const doc = await SignDocument.findById(access.documentId); if (!doc) { res.sendStatus(404); return null; } if (doc.status === 'Signed') { res.status(409).json({ error: 'This document has already been signed and completed' }); return null; } if (access.revokedAt || doc.status === 'Cancelled') { res.status(410).json({ error: 'This signing request has been cancelled' }); return null; } if (access.expiresAt < new Date()) { doc.status = 'Expired'; await doc.save(); res.status(410).json({ error: 'This signature request has expired' }); return null; } return { access, doc, signer: doc.signers.id(access.signerId) }; }
@@ -334,6 +368,9 @@ router.post('/:id/members', authenticate, permit('documents.share'), guard('canS
     const permission = req.body.permission === 'edit' ? 'edit' : 'view';
     const user = await User.findOne({ _id: req.body.userId, companyId: req.user.companyId, deletedAt: null });
     if (!user) return res.status(404).json({ error: 'That colleague is not in your organisation.' });
+    // A share across the boundary would grant nothing - the vertical is checked
+    // before sharing is - so it is refused rather than silently doing nothing.
+    if (!normaliseVerticals(user.verticals).includes(normaliseVertical(req.document.vertical))) return res.status(400).json({ error: `${user.email} is not in the ${verticalLabel(req.document.vertical)} vertical, so they cannot be given access to this document.` });
     if (String(user._id) === String(req.document.createdByUserId)) return res.status(400).json({ error: 'The owner already has full access.' });
     const member = await DocumentMember.findOneAndUpdate(
       { documentId: req.document._id, userId: user._id },
@@ -355,10 +392,11 @@ router.delete('/:id/members/:userId', authenticate, permit('documents.share'), g
   } catch (e) { next(e); }
 });
 
-// Colleagues who can be given access: everyone else active in the company.
+// Colleagues who can be given access: everyone else active in the document's
+// own vertical. Someone outside it could not see the document anyway.
 router.get('/:id/shareable-users', authenticate, permit('documents.share'), guard('canShare'), async (req, res, next) => {
   try {
-    const users = await User.find({ companyId: req.user.companyId, deletedAt: null, status: 'active', _id: { $ne: req.document.createdByUserId } }).select('firstName lastName email').sort({ firstName: 1 }).lean();
+    const users = await User.find({ companyId: req.user.companyId, deletedAt: null, status: 'active', _id: { $ne: req.document.createdByUserId }, verticals: normaliseVertical(req.document.vertical) }).select('firstName lastName email').sort({ firstName: 1 }).lean();
     res.json(users.map(user => ({ id: user._id, fullName: `${user.firstName} ${user.lastName}`.trim(), email: user.email })));
   } catch (e) { next(e); }
 });

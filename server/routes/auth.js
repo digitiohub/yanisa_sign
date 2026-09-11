@@ -7,6 +7,7 @@ const User = require('../models/User');
 const Role = require('../models/Role');
 const Company = require('../models/Company');
 const Workspace = require('../models/Workspace');
+const { normaliseVerticals, verticalLabels } = require('../config/verticals');
 const Session = require('../models/Session');
 const ActionToken = require('../models/ActionToken');
 const LoginAttempt = require('../models/LoginAttempt');
@@ -89,6 +90,7 @@ async function publicUser(user) {
   const role = await Role.findById(user.roleId).lean();
   return {
     id: user._id, companyId: user.companyId, workspaceId: user.workspaceId,
+    verticals: normaliseVerticals(user.verticals), verticalLabels: verticalLabels(user.verticals),
     firstName: user.firstName, lastName: user.lastName, fullName: `${user.firstName} ${user.lastName}`.trim(),
     email: user.email, phone: user.phone, status: user.status, emailVerified: user.emailVerified,
     role: role ? { id: role._id, key: role.key, name: role.name, rank: role.rank } : null,
