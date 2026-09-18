@@ -277,4 +277,4 @@ export function AcceptInvitePage() {
   </AuthShell>;
 }
 
-export { OtpInput, PasswordStrength };
+export { OtpInput, PasswordStrength, ResendButton };

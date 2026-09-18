@@ -40,12 +40,26 @@ const TEMPLATES = {
       <p>This code expires in ${v.expiresInMinutes} minutes and can be used once.</p>
       <p style="color:#64748b;font-size:13px">If you did not request a password reset, you can ignore this email.</p>`),
   }),
+  password_change_otp: v => ({
+    subject: 'Yanisa Sign Password Change Code',
+    html: layout('Confirm the password change', `<p>Hello ${v.firstName},</p>
+      <p>Use this code to confirm ${v.forWhom}:</p>${codeBlock(v.otp)}
+      <p>This code expires in ${v.expiresInMinutes} minutes and can be used once.</p>
+      <p style="color:#64748b;font-size:13px">If you did not start this, someone may know your password. Change it and contact your administrator.</p>`),
+  }),
   password_changed: v => ({
     subject: 'Your Yanisa Sign password was changed',
     html: layout('Your password was changed', `<p>Hello ${v.firstName},</p>
       <p>The password for your Yanisa Sign account was changed on ${v.changedAt}.</p>
       <p>All other sessions have been signed out.</p>
       <p style="color:#64748b;font-size:13px">If this was not you, contact your administrator immediately.</p>`),
+  }),
+  password_set_by_admin: v => ({
+    subject: 'Your Yanisa Sign password was changed by an administrator',
+    html: layout('Your password was changed', `<p>Hello ${v.firstName},</p>
+      <p>${v.adminName} set a new password for your Yanisa Sign account on ${v.changedAt}. They will give it to you directly.</p>
+      <p>All your sessions have been signed out. After signing in, change it from My account → Security.</p>
+      <p style="color:#64748b;font-size:13px">If you did not expect this, contact your administrator immediately.</p>`),
   }),
   email_change_otp: v => ({
     subject: 'Confirm your new email address',

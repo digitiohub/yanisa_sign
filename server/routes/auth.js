@@ -23,9 +23,10 @@ const {
   normaliseEmail, maskEmail: maskLoginEmail, OTP_TTL_SECONDS, OTP_TTL_MINUTES: LOGIN_OTP_TTL_MINUTES,
 } = require('../utils/otp');
 const { sendEmail } = require('../services/email');
+const { isReusedPassword, applyNewPassword, needsChangeCode, passwordChangeCode } = require('../services/passwords');
 const {
   sha256, randomToken, signAccessToken, setRefreshCookie, clearRefreshCookie,
-  hashPassword, comparePassword, passwordProblem, REFRESH_TOKEN_DAYS, REFRESH_COOKIE, ACCESS_TOKEN_TTL,
+  comparePassword, passwordProblem, REFRESH_TOKEN_DAYS, REFRESH_COOKIE, ACCESS_TOKEN_TTL,
 } = require('../services/tokens');
 
 const router = express.Router();
@@ -288,34 +289,6 @@ router.post('/verify-reset-otp', otpVerifyLimiter, validate(z.object({ email: em
   } catch (err) { return next(err); }
 });
 
-/**
- * Sets a new password and ends every other session. `keepSessionId` lets the
- * caller stay signed in on the device that made the change.
- */
-// True when the password matches the current one or any of the recent hashes
-// kept on the account. Only hashes are ever stored or compared.
-async function isReusedPassword(user, password) {
-  const candidates = [user.passwordHash, ...(user.passwordHistory || [])].filter(Boolean);
-  for (const hash of candidates) if (await comparePassword(password, hash)) return true;
-  return false;
-}
-
-async function applyNewPassword(user, password, { keepSessionId = null, reason = 'password_changed' } = {}) {
-  const keep = keepSessionId ? await Session.findById(keepSessionId) : null;
-  user.passwordHash = await hashPassword(password);
-  user.passwordHistory = [...(user.passwordHistory || []), user.passwordHash].slice(-5);
-  user.passwordChangedAt = new Date();
-  user.sessionsValidFrom = keep ? new Date(new Date(keep.createdAt).getTime() - 1000) : new Date();
-  user.failedLoginCount = 0;
-  user.lockedUntil = undefined;
-  if (user.status === 'invited') { user.status = 'active'; user.emailVerified = true; user.activatedAt = new Date(); }
-  await user.save();
-  const scope = { userId: user._id, revokedAt: null };
-  if (keep) scope._id = { $ne: keep._id };
-  const result = await Session.updateMany(scope, { revokedAt: new Date(), revokedReason: reason });
-  return result.modifiedCount;
-}
-
 router.post('/reset-password', validate(z.object({ resetToken: z.string().min(10), password: z.string() })), async (req, res, next) => {
   try {
     const problem = passwordProblem(req.body.password);
@@ -394,13 +367,14 @@ router.post('/accept-invite', validate(z.object({ invitationToken: z.string().mi
 
 // -------------------------------------------------------------- account
 
-router.post('/change-password', authenticate, validate(z.object({ currentPassword: passwordField, newPassword: z.string(), logoutOtherSessions: z.boolean().optional() })), async (req, res, next) => {
+router.post('/change-password', authenticate, validate(z.object({ currentPassword: passwordField, newPassword: z.string(), logoutOtherSessions: z.boolean().optional(), otp: otpField.optional() })), async (req, res, next) => {
   try {
     const problem = passwordProblem(req.body.newPassword);
     if (problem) return res.status(400).json({ error: problem });
     const user = await User.findById(req.user._id).select('+passwordHash +passwordHistory');
     if (!(await comparePassword(req.body.currentPassword, user.passwordHash))) return res.status(400).json({ error: 'Your current password is incorrect.' });
     if (await isReusedPassword(user, req.body.newPassword)) return res.status(400).json({ error: 'Choose a password you have not used before.' });
+    if (needsChangeCode(req.user) && await passwordChangeCode(req, res, { purpose: 'password_change', otp: req.body.otp, forWhom: 'the change to your own password' })) return undefined;
 
     const revoked = await applyNewPassword(user, req.body.newPassword, { keepSessionId: req.user.sessionId });
     await sendEmail({ to: user.email, template: 'password_changed', variables: { firstName: user.firstName, changedAt: new Date().toUTCString() } }).catch(() => {});

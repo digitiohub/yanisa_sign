@@ -15,7 +15,8 @@ const EmailLog = require('../models/EmailLog');
 const { authenticate, permit } = require('../middleware/auth');
 const { logAuditEvent } = require('../services/audit');
 const { issueOtp } = require('../services/otp');
-const { sha256, randomToken } = require('../services/tokens');
+const { sha256, randomToken, comparePassword, passwordProblem } = require('../services/tokens');
+const { isReusedPassword, applyNewPassword, passwordChangeCode } = require('../services/passwords');
 const { sendEmail } = require('../services/email');
 const { buildTransport, invalidateMailer, loadSetting, fromHeader } = require('../config/mailer');
 const { encryptSecret, decryptSecret } = require('../utils/secretBox');
@@ -293,6 +294,39 @@ router.post('/users/:id/reset-access', permit('users.edit'), async (req, res, ne
     if (issued.otp) await sendEmail({ to: user.email, template: 'access_reset', variables: { firstName: user.firstName, email: user.email, otp: issued.otp, expiresInMinutes: issued.expiresInMinutes }, context: { companyId: user.companyId, actorUserId: req.user._id } });
     await logAuditEvent({ req, action: 'user.access_reset', entityType: 'user', entityId: user._id, entityLabel: user.email, description: `${req.user.fullName} reset access for ${user.email}`, metadata: { sessionsRevoked: true, codeSent: Boolean(issued.otp) } });
     return res.json({ ok: true, message: `Sessions revoked and a new code was sent to ${user.email}.` });
+  } catch (err) { return next(err); }
+});
+
+// Sets a password on someone else's account, for the case where they cannot
+// use reset access (no working mailbox, or it is faster over the phone). The
+// admin re-enters their own password and then a code emailed to their own
+// mailbox, so neither an unattended session nor a leaked admin password is
+// enough to take over another account. Rank rules are the same as every other
+// user action: an Admin cannot set a Super Admin's password.
+router.post('/users/:id/set-password', permit('users.edit'), validate(z.object({
+  password: z.string(),
+  adminPassword: z.string().min(1, 'Enter your own password to confirm.'),
+  otp: z.string().trim().regex(/^\d{6}$/, 'Enter the 6-digit code.').optional(),
+})), async (req, res, next) => {
+  try {
+    if (isSelf(req, req.params.id)) return res.status(400).json({ error: 'Change your own password from My account → Security, which asks for your current one.' });
+    const { user, error, status } = await loadManageableUser(req, req.params.id);
+    if (error) return res.status(status).json({ error });
+    if (user.status === 'invited') return res.status(400).json({ error: 'This user has not accepted their invitation yet. Resend the invitation instead.' });
+
+    const problem = passwordProblem(req.body.password);
+    if (problem) return res.status(400).json({ error: problem });
+    const admin = await User.findById(req.user._id).select('+passwordHash');
+    if (!(await comparePassword(req.body.adminPassword, admin?.passwordHash))) return res.status(403).json({ error: 'Your password is incorrect.' });
+
+    const target = await User.findById(user._id).select('+passwordHash +passwordHistory');
+    if (await isReusedPassword(target, req.body.password)) return res.status(400).json({ error: 'That password was used recently on this account. Choose another.' });
+    if (await passwordChangeCode(req, res, { purpose: 'admin_password_set', otp: req.body.otp, forWhom: `a new password for ${target.email}` })) return undefined;
+    const revoked = await applyNewPassword(target, req.body.password, { reason: 'admin_password_set' });
+
+    await sendEmail({ to: target.email, template: 'password_set_by_admin', variables: { firstName: target.firstName, adminName: req.user.fullName, changedAt: new Date().toUTCString() }, context: { companyId: target.companyId, actorUserId: req.user._id } }).catch(() => {});
+    await logAuditEvent({ req, action: 'user.password_set', entityType: 'user', entityId: target._id, entityLabel: target.email, description: `${req.user.fullName} set a new password for ${target.email}`, metadata: { sessionsRevoked: revoked } });
+    return res.json({ ok: true, message: `Password updated for ${target.email}. They were signed out of ${revoked} session(s).` });
   } catch (err) { return next(err); }
 });
 

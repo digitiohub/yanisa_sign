@@ -4,7 +4,7 @@ const schema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   companyId: { type: mongoose.Schema.Types.ObjectId, ref: 'Company', index: true },
   email: { type: String, required: true, lowercase: true, index: true },
-  purpose: { type: String, required: true, enum: ['email_verification', 'password_reset', 'login_verification', 'email_change'] },
+  purpose: { type: String, required: true, enum: ['email_verification', 'password_reset', 'login_verification', 'email_change', 'password_change', 'admin_password_set'] },
   otpHash: { type: String, required: true },
   pendingEmail: String,
   expiresAt: { type: Date, required: true, index: true },

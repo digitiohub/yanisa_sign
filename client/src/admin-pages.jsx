@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
-  Activity, AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, FileText, Loader2, Lock, Mail, MailCheck, MinusCircle, MoreVertical, Plus,
+  Activity, AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronRight, FileText, KeyRound, Loader2, Lock, Mail, MailCheck, MinusCircle, MoreVertical, Plus,
   RefreshCw, Search, Send, ShieldAlert, ShieldCheck, Trash2, UserPlus, Users, X,
 } from 'lucide-react';
 import { api, errorText, formatDate, formatDateTime, initials, timeAgo } from './api';
 import { useAuth } from './auth-context';
+import { OtpInput, PasswordStrength, ResendButton } from './auth-pages';
 
 const STATUS_STYLE = { active: 'status-signed', invited: 'status-pending-signature', inactive: 'status-draft', suspended: 'status-declined' };
 
@@ -278,6 +279,57 @@ export function UsersPage() {
   </AdminFrame>;
 }
 
+// The admin types the new password, confirms with their own, then enters a
+// code emailed to their own mailbox. The server enforces the same rules as
+// self-service changes and signs the user out.
+function SetPasswordModal({ user, onClose, onDone }) {
+  const [form, setForm] = useState({ password: '', confirmPassword: '', adminPassword: '' });
+  const [challenge, setChallenge] = useState(null);
+  const [otp, setOtp] = useState('');
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const send = async withCode => {
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const { data } = await api.post(`/admin/users/${user.id}/set-password`, { password: form.password, adminPassword: form.adminPassword, ...(withCode ? { otp } : {}) });
+      if (data.otpRequired) { setChallenge(data); setOtp(''); setNotice(`We sent a 6-digit code to your email, ${data.maskedEmail}.`); return; }
+      onDone(data.message);
+    } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
+  };
+  const submit = event => {
+    event.preventDefault();
+    if (form.password !== form.confirmPassword) return setError('The two passwords do not match.');
+    return send(Boolean(challenge));
+  };
+  return <div className="modal-backdrop">
+    <form className="modal" onSubmit={submit}>
+      <div className="flex items-start justify-between">
+        <div><p className="eyebrow">Set password</p><h2 className="text-xl font-semibold">{user.fullName}</h2><p className="text-sm text-slate-500">{user.email}</p></div>
+        <button type="button" onClick={onClose}><X /></button>
+      </div>
+      {notice && <div className="info-box mt-4">{notice}</div>}
+      {error && <div className="error-box mt-4">{error}</div>}
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <label className="field-label">New password<input type="password" autoComplete="new-password" disabled={Boolean(challenge)} value={form.password} onChange={event => setForm({ ...form, password: event.target.value })} /></label>
+        <label className="field-label">Confirm new password<input type="password" autoComplete="new-password" disabled={Boolean(challenge)} value={form.confirmPassword} onChange={event => setForm({ ...form, confirmPassword: event.target.value })} /></label>
+      </div>
+      {!challenge && <PasswordStrength value={form.password} />}
+      <label className="field-label mt-4">Your password<input type="password" autoComplete="current-password" disabled={Boolean(challenge)} value={form.adminPassword} onChange={event => setForm({ ...form, adminPassword: event.target.value })} /></label>
+      {challenge && <div className="mt-4">
+        <p className="text-sm font-medium">Verification code</p>
+        <div className="mt-2"><OtpInput value={otp} onChange={setOtp} disabled={busy} /></div>
+        <ResendButton onResend={() => send(false)} seconds={challenge.resendAfterSeconds || 45} />
+      </div>}
+      <p className="mt-3 text-xs text-slate-500">They will be signed out everywhere and emailed that their password was changed. Give them the new password directly; it is not sent by email.</p>
+      <div className="mt-5 flex justify-end gap-2">
+        <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
+        <button className="primary-button" disabled={busy || !form.password || !form.adminPassword || (challenge && otp.length !== 6)}>{busy && <Loader2 className="animate-spin" size={16} />}{challenge ? 'Verify and set password' : 'Send code'}</button>
+      </div>
+    </form>
+  </div>;
+}
+
 export function UserDetailPage() {
   const { id } = useParams();
   const auth = useAuth();
@@ -288,6 +340,7 @@ export function UserDetailPage() {
   const [verticals, setVerticals] = useState([]);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [settingPassword, setSettingPassword] = useState(false);
 
   const load = useCallback(() => api.get(`/admin/users/${id}`).then(({ data }) => setDetail(data)).catch(failure => setError(errorText(failure))), [id]);
   useEffect(() => { load(); api.get('/admin/roles').then(({ data }) => setRoles(data)).catch(() => {}); api.get('/admin/workspaces').then(({ data }) => setWorkspaces(data)).catch(() => {}); api.get('/admin/verticals').then(({ data }) => setVerticals(data)).catch(() => {}); }, [load]);
@@ -354,12 +407,13 @@ export function UserDetailPage() {
 
         <div className="card">
           <h2 className="card-title">Admin actions</h2>
-          <p className="text-xs text-slate-500">Passwords are never visible to administrators. Reset access ends every session and emails a fresh code.</p>
+          <p className="text-xs text-slate-500">Passwords are never visible to administrators. Reset access ends every session and emails a fresh code; Set password lets you choose one for them.</p>
           <div className="mt-4 flex flex-wrap gap-2">
             {auth.can('users.edit') && user.status !== 'active' && <button className="secondary-button" onClick={() => act('activate', 'Activation')}>Activate</button>}
             {auth.can('users.edit') && user.status === 'active' && <button className="secondary-button" onClick={() => act('deactivate', 'Deactivation')}>Deactivate</button>}
             {auth.can('users.edit') && <button className="secondary-button" onClick={() => act('suspend', 'Suspension')}>Suspend</button>}
             {auth.can('users.edit') && <button className="secondary-button" onClick={() => act('reset-access', 'Access reset')}><RefreshCw size={15} />Reset access</button>}
+            {auth.can('users.edit') && user.status !== 'invited' && String(user.id) !== String(auth.user?.id) && <button className="secondary-button" onClick={() => setSettingPassword(true)}><KeyRound size={15} />Set password</button>}
             {auth.can('sessions.revoke') && <button className="secondary-button" onClick={() => act('revoke-sessions', 'Session revocation')}>Revoke sessions</button>}
             {auth.can('users.create') && user.status === 'invited' && <button className="secondary-button" onClick={() => act('resend-invitation', 'Invitation')}><Mail size={15} />Resend invitation</button>}
           </div>
@@ -415,6 +469,7 @@ export function UserDetailPage() {
         </div>
       </div>
     </div>
+    {settingPassword && <SetPasswordModal user={user} onClose={() => setSettingPassword(false)} onDone={text => { setSettingPassword(false); setError(''); setMessage(text); load(); }} />}
   </AdminFrame>;
 }
 

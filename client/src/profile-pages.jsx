@@ -3,7 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { Activity, KeyRound, Loader2, Monitor, ShieldCheck, Trash2, UserCog } from 'lucide-react';
 import { api, errorText, formatDateTime, initials, timeAgo } from './api';
 import { useAuth } from './auth-context';
-import { PasswordStrength } from './auth-pages';
+import { OtpInput, PasswordStrength, ResendButton } from './auth-pages';
 
 function ProfileTabs() {
   const { pathname } = useLocation();
@@ -92,6 +92,9 @@ export function ProfilePage() {
 
 export function SecurityPage() {
   const [form, setForm] = useState({ currentPassword: '', newPassword: '', confirmPassword: '' });
+  // Set when the server asks for an emailed code (administrators only).
+  const [challenge, setChallenge] = useState(null);
+  const [otp, setOtp] = useState('');
   const [sessions, setSessions] = useState([]);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
@@ -100,17 +103,23 @@ export function SecurityPage() {
   const loadSessions = () => api.get('/auth/sessions').then(({ data }) => setSessions(data)).catch(() => {});
   useEffect(() => { loadSessions(); }, []);
 
-  const changePassword = async event => {
-    event.preventDefault();
-    if (form.newPassword !== form.confirmPassword) return setError('The two passwords do not match.');
+  const submitChange = async withCode => {
     setBusy(true); setError(''); setMessage('');
     try {
-      await api.post('/auth/change-password', { currentPassword: form.currentPassword, newPassword: form.newPassword });
+      const { data } = await api.post('/auth/change-password', { currentPassword: form.currentPassword, newPassword: form.newPassword, ...(withCode ? { otp } : {}) });
+      if (data.otpRequired) { setChallenge(data); setOtp(''); setMessage(`We sent a 6-digit code to ${data.maskedEmail}. Enter it to confirm the change.`); return; }
       setForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      setChallenge(null); setOtp('');
       setMessage('Password changed. Every other device has been signed out.');
       loadSessions();
     } catch (failure) { setError(errorText(failure)); } finally { setBusy(false); }
   };
+  const changePassword = event => {
+    event.preventDefault();
+    if (form.newPassword !== form.confirmPassword) return setError('The two passwords do not match.');
+    return submitChange(Boolean(challenge));
+  };
+  const cancelChallenge = () => { setChallenge(null); setOtp(''); setMessage(''); setError(''); };
   const revoke = async id => { await api.delete(`/auth/sessions/${id}`); loadSessions(); };
   const revokeOthers = async () => { const { data } = await api.delete('/auth/sessions'); setMessage(`Signed out of ${data.revoked} other device(s).`); loadSessions(); };
 
@@ -120,13 +129,21 @@ export function SecurityPage() {
     <form className="card mt-5" onSubmit={changePassword}>
       <h2 className="card-title"><KeyRound size={17} />Change password</h2>
       <div className="grid gap-4 sm:grid-cols-2">
-        <label className="field-label sm:col-span-2">Current password<input type="password" autoComplete="current-password" value={form.currentPassword} onChange={event => setForm({ ...form, currentPassword: event.target.value })} /></label>
-        <label className="field-label">New password<input type="password" autoComplete="new-password" value={form.newPassword} onChange={event => setForm({ ...form, newPassword: event.target.value })} /></label>
-        <label className="field-label">Confirm new password<input type="password" autoComplete="new-password" value={form.confirmPassword} onChange={event => setForm({ ...form, confirmPassword: event.target.value })} /></label>
+        <label className="field-label sm:col-span-2">Current password<input type="password" autoComplete="current-password" disabled={Boolean(challenge)} value={form.currentPassword} onChange={event => setForm({ ...form, currentPassword: event.target.value })} /></label>
+        <label className="field-label">New password<input type="password" autoComplete="new-password" disabled={Boolean(challenge)} value={form.newPassword} onChange={event => setForm({ ...form, newPassword: event.target.value })} /></label>
+        <label className="field-label">Confirm new password<input type="password" autoComplete="new-password" disabled={Boolean(challenge)} value={form.confirmPassword} onChange={event => setForm({ ...form, confirmPassword: event.target.value })} /></label>
       </div>
-      <PasswordStrength value={form.newPassword} />
+      {!challenge && <PasswordStrength value={form.newPassword} />}
+      {challenge && <div className="mt-4">
+        <p className="text-sm font-medium">Verification code sent to {challenge.maskedEmail}</p>
+        <div className="mt-2"><OtpInput value={otp} onChange={setOtp} disabled={busy} /></div>
+        <ResendButton onResend={() => submitChange(false)} seconds={challenge.resendAfterSeconds || 45} />
+      </div>}
       <p className="mt-3 text-xs text-slate-500">Changing your password signs out every other device.</p>
-      <button className="primary-button mt-4" disabled={busy}>{busy && <Loader2 className="animate-spin" size={16} />}Update password</button>
+      <div className="mt-4 flex gap-2">
+        <button className="primary-button" disabled={busy || (challenge && otp.length !== 6)}>{busy && <Loader2 className="animate-spin" size={16} />}{challenge ? 'Verify and update password' : 'Update password'}</button>
+        {challenge && <button type="button" className="secondary-button" onClick={cancelChallenge}>Cancel</button>}
+      </div>
     </form>
 
     <div className="card mt-5">
